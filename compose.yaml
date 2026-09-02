@@ -1,0 +1,98 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    additional_contexts:
+      urban_observations: ../urban-observations
+  image: sigmus:local
+  restart: unless-stopped
+  volumes:
+    - ./.runtime/config.docker.json:/app/config.json:ro
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SIGMUS_POSTGRES_DB:?Run ./docker-start instead of docker compose directly}
+      POSTGRES_USER: ${SIGMUS_POSTGRES_USER:?Run ./docker-start instead of docker compose directly}
+      POSTGRES_PASSWORD: ${SIGMUS_POSTGRES_PASSWORD:?Run ./docker-start instead of docker compose directly}
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  neo4j:
+    image: neo4j:5
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${SIGMUS_NEO4J_PASSWORD:?Run ./docker-start instead of docker compose directly}
+    ports:
+      - "127.0.0.1:${SIGMUS_NEO4J_BROWSER_PORT:-7474}:7474"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  marqo:
+    image: marqoai/marqo:latest
+    restart: unless-stopped
+    volumes:
+      - marqo-data:/opt/vespa/var
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8882/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  ingestion:
+    <<: *app
+    depends_on:
+      timescaledb: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      marqo: {condition: service_healthy}
+    volumes:
+      - ./.runtime/config.docker.json:/app/config.json:ro
+      - type: bind
+        source: ${SIGMUS_STREAM_FOLDER:?Run ./docker-start instead of docker compose directly}
+        target: /streams
+        read_only: true
+      - ingestion-state:/state
+    command: ["python", "-m", "kg_construction.stream_worker", "--input", "/streams/${SIGMUS_STREAM_FILE:-observations.jsonl}"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /state/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  mcp:
+    <<: *app
+    depends_on:
+      timescaledb: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      marqo: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${SIGMUS_MCP_PORT:-8006}:8006"
+    environment:
+      SIGMUS_QA_HOST: 0.0.0.0
+      SIGMUS_QA_PORT: 8006
+    command: ["python", "-m", "qa.mcp_server"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1',8006),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+volumes:
+  timescale-data:
+  neo4j-data:
+  marqo-data:
+  ingestion-state:

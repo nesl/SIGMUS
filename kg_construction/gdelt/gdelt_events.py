@@ -109,6 +109,13 @@ def filter_llm_event_responses(llm_response):
 # Prompt the LLM for a given entry:
 def prompt_on_news(news_url, llm_client, llm_prompt, cameo_definitions, actor_types, cap_terms, event_date):
 
+    if os.environ.get("SIGMUS_ALLOW_LEGACY_LOCAL_ENRICHMENT") != "1":
+        raise RuntimeError(
+            "SIGMUS-local article download and enrichment is disabled by default. "
+            "Use shared Urban Observations annotations, or explicitly set "
+            "SIGMUS_ALLOW_LEGACY_LOCAL_ENRICHMENT=1 for compatibility."
+        )
+
     intermediate_save_folder = "intermediate"
     if not os.path.exists(intermediate_save_folder):
         os.mkdir(intermediate_save_folder)

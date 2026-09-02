@@ -1,8 +1,10 @@
 config.json
+.runtime/
 .env
 .env.*
-!.env.example
 .venv/
+.venv*/
+.sigmus-venv/
 venv/
 cache/
 data/

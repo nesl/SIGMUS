@@ -27,19 +27,20 @@ class OpenAIClient:
         self.client = OpenAI(api_key=api_key)
 
         # Additional stuff
-        self.model = "gpt-4o"
+        self.model = self.openai.get("model", "gpt-4o-mini")
         self.message_history = []        
 
     
     # Does not use memory
     def send_message_to_llm_single(self, user_input, temperature=0.0):
 
-        user_message = {"role": "user", "content": user_input, "temperature":temperature}
+        user_message = {"role": "user", "content": user_input}
 
        # Send to llm
         llm_response = self.client.chat.completions.create(
             model=self.model,
-            messages=[user_message]
+            messages=[user_message],
+            temperature=temperature,
         )
 
         llm_response = llm_response.choices[0].message.content
@@ -49,13 +50,14 @@ class OpenAIClient:
     def send_message_to_llm_historic(self, user_input, temperature=0.0):
 
         user_input = "\nUSER Request: \n" + user_input
-        user_message = {"role": "user", "content": user_input, "temperature":temperature}
+        user_message = {"role": "user", "content": user_input}
         self.message_history.append(user_message)
 
         # Send to llm
         llm_response = self.client.chat.completions.create(
             model=self.model,
-            messages=self.message_history
+            messages=self.message_history,
+            temperature=temperature,
         )
 
         llm_response = "LLM Response: \n" + llm_response.choices[0].message.content

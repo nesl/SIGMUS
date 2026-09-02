@@ -7,10 +7,17 @@ name = "sigmus"
 version = "0.1.0"
 description = "Multimodal urban knowledge-graph construction and integration"
 requires-python = ">=3.10"
+dependencies = [
+    "urban-observations>=0.1,<1",
+]
+
+[project.scripts]
+sigmus-mcp = "qa.mcp_server:main"
+sigmus-ask = "qa.client:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kg_construction*", "llm*", "utilities*"]
+include = ["kg_construction*", "llm*", "utilities*", "observation_adapter*", "qa*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.txt"]

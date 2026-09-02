@@ -1,0 +1,23 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    URBAN_SYSTEM_CONFIG=/app/config.json
+
+WORKDIR /build
+COPY requirements.txt /build/sigmus/requirements.txt
+RUN pip install --no-cache-dir -r /build/sigmus/requirements.txt
+
+COPY --from=urban_observations / /build/urban-observations
+COPY . /build/sigmus
+RUN pip install --no-cache-dir --no-deps /build/urban-observations \
+    && pip install --no-cache-dir --no-deps /build/sigmus \
+    && rm -rf /build
+
+WORKDIR /app
+RUN useradd --create-home --uid 10001 sigmus \
+    && mkdir -p /state /streams \
+    && chown -R sigmus:sigmus /state /streams
+USER sigmus
+
+CMD ["python", "-m", "kg_construction.stream_worker"]

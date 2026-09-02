@@ -1,0 +1,10 @@
+.git
+.venv*
+.sigmus-venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+config.json
+.runtime
+build
+dist

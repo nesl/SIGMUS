@@ -3,6 +3,7 @@ fuzzywuzzy==0.18.0
 googlemaps==4.10.0
 lxml-html-clean>=0.4,<1
 marqo==3.11.0
+mcp>=1.27,<2
 neo4j==5.26.0
 newspaper3k==0.2.8
 numpy==2.1.3

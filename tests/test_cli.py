@@ -46,3 +46,9 @@ def test_cli_rejects_missing_source_date(monkeypatch, tmp_path):
         assert "20260815" in str(exc)
     else:
         raise AssertionError("missing input date was accepted")
+
+
+def test_cli_accepts_enriched_stream_input():
+    args = cli.build_parser().parse_args(["ingest-stream", "--input", "records.jsonl"])
+    assert args.command == "ingest-stream"
+    assert args.input == Path("records.jsonl")

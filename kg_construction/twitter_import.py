@@ -13,7 +13,8 @@ import statistics
 
 # Add LLM import
 from utilities.util import get_config
-from llm.client import LLMClient, OpenAIClient
+from llm.client import OpenAIClient
+from kg_construction.email_records import records_from_csv
 
 
 TABLE_NAME = "twitter"
@@ -26,36 +27,27 @@ def is_nan(obj):
     return True if obj!=obj else False
 
 #  
-def pull_into_kg(event_filepath, time_series_manager, kg_manager, geocode_manager):
+def pull_into_kg(event_filepath, time_series_manager, kg_manager, geocode_manager, llm_client=None):
     global TOTAL_ARTICLES
     # Open the GKG file
-    df = pd.read_csv(event_filepath)
-
-    error_cases = 0
-
-    news_times = []
     kg_times = []
 
-    # Iterate through each row in the GKG file
-    for index, row in df.iterrows():
+    for row in records_from_csv(event_filepath, "twitter", llm_client, OpenAIClient):
 
     
         kg_start_t = time.time()
 
         # Get the timestamp
-        timestamp = row.iloc[4]
-        time_end = row.iloc[5]
-        if is_nan(row.iloc[4]) or is_nan(row.iloc[5]):
-            timestamp = row.iloc[1]
-            time_end = row.iloc[1]
+        timestamp = row["timestamp"]
+        time_end = row["end_time"]
         
         # Get the location name
-        loc_name = row.iloc[3]
+        loc_name = row["location"]
 
         event_latitude,event_longitude = geocode_manager.geocode_name(loc_name)
 
-        event_body = row.iloc[6]
-        event_type = row.iloc[2]
+        event_body = row["description"]
+        event_type = row["event_type"] or row["event_name"]
         source_name = "NotifyLA"
 
         # Now, insert the data into the table
@@ -84,13 +76,9 @@ def pull_into_kg(event_filepath, time_series_manager, kg_manager, geocode_manage
         kg_times.append(kg_end_t - kg_start_t)
 
         TOTAL_ARTICLES = TOTAL_ARTICLES + 1
-        print("Error cases: ", error_cases)
-
-        asdf
-
-    if not news_times:
+    if not kg_times:
         return None, None
-    return statistics.mean(news_times), statistics.mean(kg_times)
+    return 0.0, statistics.mean(kg_times)
 
 def pull_by_day_folders(day_folders):
 
@@ -122,7 +110,7 @@ def pull_by_day_folders(day_folders):
             data_filepath = os.path.join(day_folder_path, event_file)
 
             news_times, kg_times = pull_into_kg(data_filepath, time_series_manager, kg_manager, geocode_manager)
-            if not news_times:
+            if news_times is None:
                 continue   
             all_news_times.append(news_times)
             all_kg_times.append(kg_times)
@@ -167,7 +155,7 @@ if __name__ == "__main__":
             data_filepath = os.path.join(day_folder_path, event_file)
 
             news_times, kg_times = pull_into_kg(data_filepath, time_series_manager, kg_manager, geocode_manager)
-            if not news_times:
+            if news_times is None:
                 continue   
             all_news_times.append(news_times)
             all_kg_times.append(kg_times)

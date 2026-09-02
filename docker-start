@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+config_file="$repo_dir/config.json"
+runtime_dir="$repo_dir/.runtime"
+
+usage() {
+  echo "Usage: ./docker-start {up|down|stop|start|restart|ps|logs|pull|build|config} [ARGS...]"
+}
+
+if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ ! -f "$config_file" ]]; then
+  echo "Missing $config_file; copy config.example.json to config.json and edit it." >&2
+  exit 2
+fi
+
+mkdir -p "$runtime_dir"
+chmod 700 "$runtime_dir"
+eval "$(python3 - "$config_file" "$runtime_dir/config.docker.json" "$repo_dir" <<'PY'
+import json
+from pathlib import Path
+import shlex
+import sys
+
+source, destination, repo = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+config = json.loads(source.read_text(encoding="utf-8"))
+
+def require(section, key):
+    try:
+        value = config[section][key]
+    except (KeyError, TypeError):
+        raise SystemExit(f"config.json requires {section}.{key}")
+    if value in (None, "", "replace_me"):
+        raise SystemExit(f"config.json requires a real value for {section}.{key}")
+    return str(value)
+
+stream_value = config.get("enriched_stream_path", "../urban-observations/processing-output/observations.jsonl")
+stream = Path(stream_value).expanduser()
+if not stream.is_absolute():
+    stream = (repo / stream).resolve()
+stream.parent.mkdir(parents=True, exist_ok=True)
+
+docker_config = dict(config)
+docker_config["postgres_config"] = dict(config["postgres_config"], host="timescaledb", port=5432)
+docker_config["neo4j_config"] = dict(config["neo4j_config"], uri="bolt://neo4j:7687", username="neo4j")
+docker_config["marqo_config"] = {**config.get("marqo_config", {}), "uri": "http://marqo:8882"}
+destination.write_text(json.dumps(docker_config, indent=2) + "\n", encoding="utf-8")
+# The application image runs as an unprivileged UID. The containing host
+# directory is 0700 and the file is mounted read-only into only those services.
+destination.chmod(0o644)
+
+values = {
+    "SIGMUS_POSTGRES_DB": require("postgres_config", "dbname"),
+    "SIGMUS_POSTGRES_USER": require("postgres_config", "user"),
+    "SIGMUS_POSTGRES_PASSWORD": require("postgres_config", "password"),
+    "SIGMUS_NEO4J_PASSWORD": require("neo4j_config", "password"),
+    "SIGMUS_STREAM_FOLDER": str(stream.parent),
+    "SIGMUS_STREAM_FILE": stream.name,
+    "SIGMUS_MCP_PORT": str(config.get("mcp_port", 8006)),
+    "SIGMUS_NEO4J_BROWSER_PORT": str(config.get("neo4j_browser_port", 7474)),
+}
+for key, value in values.items():
+    print(f"export {key}={shlex.quote(value)}")
+PY
+)"
+
+compose=(docker compose --project-directory "$repo_dir" -f "$repo_dir/compose.yaml")
+
+case "${1:-}" in
+  up) shift; exec "${compose[@]}" up -d --build "$@" ;;
+  down|stop|start|restart|ps|logs|pull|build)
+    action=$1; shift; exec "${compose[@]}" "$action" "$@" ;;
+  config) exec "${compose[@]}" config --quiet ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

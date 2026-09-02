@@ -18,6 +18,7 @@ import copy
 import statistics
 import json
 import time
+from pathlib import Path
 
 # Add fuzzy similarity matching
 from fuzzywuzzy import fuzz
@@ -654,7 +655,8 @@ class vectorstoreManager:
 
         # Add the incident data to the index
         results = self.mq_client.index(self.index_name).add_documents([
-            {"id": incident_id, "label": incident_label, "text": incident_text}
+            {"_id": str(incident_id), "neo4j_id": str(incident_id),
+             "label": incident_label, "text": incident_text}
         ], tensor_fields=["label"])
 
         print("Adding incident: " + str(incident_label))
@@ -702,33 +704,37 @@ class vectorstoreManager:
 
 class KGManager:
 
-    def __init__(self, time_series_manager=None, connect_reports=True, use_vectordb=False):
+    def __init__(self, time_series_manager=None, connect_reports=True, use_vectordb=False,
+                 enable_graph_reasoning=False, driver=None, llm_client=None, vector_db=None):
 
         self.config = get_config()
         self.neo4j_config = self.config["neo4j_config"]
         uri = self.neo4j_config["uri"]
         username = self.neo4j_config["username"]
         password = self.neo4j_config["password"]
-        self.driver = GraphDatabase.driver(uri, auth=(username, password))
+        self.driver = driver or GraphDatabase.driver(uri, auth=(username, password))
 
         # Have a corresponding timeseries manager
         self.ts_manager = time_series_manager
 
         # Obtain merging prompts
-        with open("llm/prompts/align_nodes.json", "r") as f:
+        prompt_root = Path(__file__).resolve().parents[1] / "llm" / "prompts"
+        with (prompt_root / "align_nodes.json").open("r", encoding="utf-8") as f:
             self.align_actor_prompt = json.load(f)
 
         # Obtain incident linking prompts
-        with open("llm/prompts/incident_linking.json", "r") as f:
+        with (prompt_root / "incident_linking.json").open("r", encoding="utf-8") as f:
             self.incident_linking_prompt = json.load(f)
 
         # LLM client
         # llm_uri = self.config["llm_host"]["uri"]
         # self.llm_client = LLMClient(llm_uri)
-        self.llm_client = OpenAIClient()
+        self.enable_graph_reasoning = bool(enable_graph_reasoning)
+        self.llm_client = llm_client or (OpenAIClient() if self.enable_graph_reasoning else None)
 
         # initialize vectordb
-        if use_vectordb:
+        self.vector_db = vector_db
+        if use_vectordb and self.vector_db is None:
             self.vector_db = vectorstoreManager("incidents")
 
         # Keep track of different times
@@ -737,6 +743,177 @@ class KGManager:
         self.link_modality_times = []
 
         self.connect_reports = connect_reports
+
+    @staticmethod
+    def _annotation_name(item):
+        if isinstance(item, dict):
+            return str(item.get("name") or item.get("label") or "").strip()
+        return str(item or "").strip()
+
+    def insert_common_observation(self, record):
+        """Idempotently project one authoritative enriched record into Neo4j."""
+        event = record.get("event") if isinstance(record.get("event"), dict) else {}
+        summary = str(record.get("summary") or event.get("description") or "")
+        incident_names = [self._annotation_name(item) for item in record.get("incidents", [])]
+        incident_names = [name for name in incident_names if name]
+        query = """
+        MERGE (agg:Aggregator {name: $source})
+        MERGE (obs:Observer {name: $sensor, source: $source})
+        MERGE (agg)-[:HAS_OBSERVER]->(obs)
+        MERGE (rep:Report {observation_id: $observation_id})
+        SET rep.time=$time, rep.end_time=$end_time, rep.latitude=$latitude,
+            rep.longitude=$longitude, rep.summary=$summary, rep.source=$source,
+            rep.event_name=$event_name, rep.event_type=$event_type,
+            rep.incident_names=$incident_names
+        MERGE (obs)-[:HAS_REPORT]->(rep)
+        MERGE (dat:Data {observation_id: $observation_id})
+        SET dat.data_val=$data_json, dat.annotations=$annotations_json
+        MERGE (rep)-[:HAS_DATA]->(dat)
+        MERGE (tim:TimeEntity {observation_id: $observation_id})
+        SET tim.start_time=$time, tim.end_time=coalesce($end_time, $time)
+        MERGE (rep)-[:CAPTURE_TIME]->(tim)
+        FOREACH (_ IN CASE WHEN $latitude IS NULL OR $longitude IS NULL THEN [] ELSE [1] END |
+          MERGE (geo:GeoEntity {observation_id: $observation_id})
+          SET geo.latitude=$latitude, geo.longitude=$longitude
+          MERGE (rep)-[:OCCURRED_AT]->(geo))
+        RETURN elementId(rep) AS report_id
+        """
+        annotations = {key: record.get(key) for key in (
+            "event", "summary", "entities", "relations", "effects", "incidents",
+            "anomaly", "enrichment",
+        )}
+        with self.driver.session() as session:
+            result = session.run(
+                query, source=record["source"], sensor=str(record["sensor"]),
+                observation_id=record["id"], time=record["time"],
+                end_time=record.get("end_time"), latitude=record.get("latitude"),
+                longitude=record.get("longitude"), summary=summary,
+                event_name=event.get("name"), event_type=event.get("type"),
+                incident_names=incident_names,
+                data_json=json.dumps(record.get("data") or {}, ensure_ascii=False),
+                annotations_json=json.dumps(annotations, ensure_ascii=False),
+            )
+            report_id = result.single()["report_id"]
+
+        actor_ids = {}
+        for entity in record.get("entities", []):
+            if not isinstance(entity, dict) or not entity.get("name"):
+                continue
+            location = entity.get("location") if isinstance(entity.get("location"), dict) else {}
+            coords = [location.get("latitude"), location.get("longitude")]
+            actor = Actor(str(entity["name"]), str(entity.get("type") or "Unknown"),
+                          str(entity.get("description") or ""), str(location.get("text") or ""), coords)
+            actor_id = self.create_or_merge_actor(actor)
+            actor_ids[str(entity["name"])] = actor_id
+            with self.driver.session() as session:
+                session.run("""
+                    MATCH (rep:Report), (actor:Actor)
+                    WHERE elementId(rep)=$report_id AND elementId(actor)=$actor_id
+                    MERGE (rep)-[:MENTIONS]->(actor)
+                """, report_id=report_id, actor_id=actor_id)
+
+        for relation in record.get("relations", []):
+            if not isinstance(relation, dict):
+                continue
+            subject_id, object_id = actor_ids.get(str(relation.get("subject"))), actor_ids.get(str(relation.get("object")))
+            if not subject_id or not object_id:
+                continue
+            with self.driver.session() as session:
+                session.run("""
+                    MATCH (a:Actor), (b:Actor)
+                    WHERE elementId(a)=$subject_id AND elementId(b)=$object_id
+                    MERGE (rel:EntityRelation {observation_id:$observation_id, subject_id:$subject_id,
+                                               object_id:$object_id, predicate:$predicate})
+                    MERGE (a)-[:SUBJECT_OF]->(rel)
+                    MERGE (rel)-[:OBJECT_OF]->(b)
+                """, subject_id=subject_id, object_id=object_id,
+                    observation_id=record["id"], predicate=str(relation.get("predicate") or "related_to"))
+
+        for name in incident_names:
+            self.link_incidents(report_id, Incident(name, summary))
+        has_semantics = bool(summary or event or incident_names or record.get("effects"))
+        enrichment = record.get("enrichment") or {}
+        if (self.enable_graph_reasoning and has_semantics
+                and enrichment.get("status") != "skipped_by_anomaly"):
+            self.link_cross_modal_reports(report_id, record)
+        return report_id
+
+    @staticmethod
+    def _json_object(text):
+        start, end = str(text).find("{"), str(text).rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("LLM response did not contain a JSON object")
+        value = json.loads(str(text)[start:end + 1])
+        if not isinstance(value, dict):
+            raise ValueError("LLM response JSON was not an object")
+        return value
+
+    def link_cross_modal_reports(self, report_id, record, max_candidates=12):
+        """Add evidence links across sources using bounded Neo4j context."""
+        if self.llm_client is None:
+            return []
+        with self.driver.session() as session:
+            rows = session.run("""
+                MATCH (candidate:Report)
+                WHERE elementId(candidate) <> $report_id
+                  AND candidate.observation_id IS NOT NULL
+                  AND candidate.source <> $source
+                RETURN elementId(candidate) AS id, candidate.observation_id AS observation_id,
+                       candidate.time AS time, candidate.summary AS summary,
+                       candidate.event_type AS event_type, candidate.incident_names AS incidents,
+                       candidate.latitude AS latitude, candidate.longitude AS longitude
+                ORDER BY candidate.time DESC LIMIT $limit
+            """, report_id=report_id, source=record["source"], limit=int(max_candidates))
+            candidates = [dict(row) for row in rows]
+        if not candidates:
+            return []
+        incoming_context = {
+            "observation_id": record["id"], "source": record["source"],
+            "time": record["time"], "latitude": record.get("latitude"),
+            "longitude": record.get("longitude"), "summary": record.get("summary"),
+            "event": record.get("event"), "incidents": record.get("incidents"),
+            "effects": record.get("effects"),
+        }
+        prompt = (
+            "Determine which candidate reports corroborate or describe the same real-world event as "
+            "the incoming report. Use time, location, event type, incidents, and summary. Return only "
+            "JSON: {\"links\":[{\"candidate_id\":\"Neo4j element id\",\"confidence\":0.0,"
+            "\"reason\":\"short explanation\"}]}. Exclude weak or merely topical matches.\n\n"
+            f"Incoming: {json.dumps(incoming_context, default=str, ensure_ascii=False)}\n"
+            f"Candidates: {json.dumps(candidates, default=str, ensure_ascii=False)}"
+        )
+        try:
+            output, _ = self.llm_client.send_message_to_llm_single(prompt)
+            parsed = self._json_object(output)
+        except Exception as exc:
+            print(f"Cross-modality linking skipped after reasoning error: {exc}")
+            return []
+        allowed = {str(item["id"]) for item in candidates}
+        created = []
+        for link in parsed.get("links") or []:
+            if not isinstance(link, dict) or str(link.get("candidate_id")) not in allowed:
+                continue
+            try:
+                confidence = float(link.get("confidence", 0))
+            except (TypeError, ValueError):
+                continue
+            if confidence < 0.6:
+                continue
+            candidate_id = str(link["candidate_id"])
+            with self.driver.session() as session:
+                session.run("""
+                    MATCH (a:Report), (b:Report)
+                    WHERE elementId(a)=$report_id AND elementId(b)=$candidate_id
+                    MERGE (ctx:LLM_CONTEXT {source_observation_id:$source_observation_id,
+                                            target_element_id:$candidate_id, kind:'cross_modality'})
+                    SET ctx.reason=$reason, ctx.confidence=$confidence
+                    MERGE (a)-[:CORROBORATES]->(ctx)
+                    MERGE (ctx)-[:CORROBORATES]->(b)
+                """, report_id=report_id, candidate_id=candidate_id,
+                    source_observation_id=record["id"], reason=str(link.get("reason") or ""),
+                    confidence=confidence)
+            created.append(candidate_id)
+        return created
 
 
 
@@ -748,7 +925,8 @@ class KGManager:
             print("All nodes and relationships have been deleted.")
         
         # Also clear atached vectordb
-        self.vector_db.clear_database()
+        if self.vector_db is not None:
+            self.vector_db.clear_database()
 
     def close_driver(self):
         self.driver.close()
@@ -995,12 +1173,15 @@ class KGManager:
                 result = session.run(query_actors, target_actor_id=node_id)
                 other_contexts = [(record['other_actor'], record['action'], record['data']['situation'],record['geo']) for record in result]
 
-            # This actor doesn't have a location or any other context
-            if not node_location or not other_contexts:
-                return "", node_ids
-            
-
-            message_content = self.format_actor_context(node_attributes, node_location, other_contexts)
+            # Common-stream actors may not have the richer Action subgraph used
+            # by legacy importers. Their own properties are still valid merge
+            # evidence; include optional context when it exists.
+            if node_location and other_contexts:
+                message_content = self.format_actor_context(
+                    node_attributes, node_location, other_contexts
+                )
+            else:
+                message_content = self.obtain_node_properties(node_attributes)
             messages.append(message_content)
 
         candidate_actors = ["Candidate " + str(i) + "\n\n" + x for i,x in enumerate(messages)]
@@ -1079,36 +1260,44 @@ class KGManager:
             result = session.run(query)
             node_list = [{"id": record["id"], "attributes": record["attrs"]} for record in result]
 
-        if node_type == "Actor":
+        if node_type == "Actor" and self.enable_graph_reasoning and self.llm_client is not None:
 
             most_similar_nodes = self.get_top_similar_nodes(node.name, node_list, "name")
 
 
-            # Query the nodes
+            # Query only the bounded fuzzy-match candidates. The LLM decides
+            # identity; it never supplies an arbitrary database identifier.
             neo4j_context, node_ids = self.query_actor_context_neo4j(most_similar_nodes)
-
-
-            if neo4j_context: # There's actually context for this node
-                target_context = self.query_actor_context_ont(node)
-
-                # Now, prompt the LLM
-                prompt = self.align_actor_prompt["choose_actors"] + "\n\n" + target_context + "\n\n" + neo4j_context + "\n\n" + self.align_actor_prompt["choose_actors_format"]
-
-
-                output, thoughts = self.llm_client.send_message_to_llm_single(prompt)
-
-                # Get the chosen node
-                chosen_id = output.split("<ACTOR>")[1].split("</ACTOR>")[0]
-                chosen_id = int(chosen_id)
-
-
-                # We have to update
-                if chosen_id > -1:
-                    merge_occurred = True
-                    chosen_node = node_ids[chosen_id]
-                    update_name = True if "<UPDATE_NAME>" in output else False
-                    actor_id = self.update_actor_node(node, chosen_node, update_name)
-                    return merge_occurred, actor_id
+            if neo4j_context:
+                incoming_actor = {
+                    "name": node.name,
+                    "actor_type": node.actor_type,
+                    "actor_type_description": node.actor_type_desc,
+                    "location": {
+                        "address": node.geo_info.address,
+                        "coordinates": node.geo_info.coordinates,
+                        "description": node.geo_info.description,
+                    },
+                }
+                prompt = (
+                    "Determine whether the incoming actor is the same real-world entity as one "
+                    "candidate. Return only JSON: "
+                    '{"candidate_index": -1, "update_name": false, "reason": "..."}. '
+                    "Use -1 when uncertain. candidate_index is the zero-based candidate number.\n\n"
+                    f"Incoming actor:\n{json.dumps(incoming_actor, default=str)}\n\n"
+                    f"Candidates:\n{neo4j_context}"
+                )
+                try:
+                    output, _ = self.llm_client.send_message_to_llm_single(prompt)
+                    decision = self._json_object(output)
+                    chosen_id = int(decision.get("candidate_index", -1))
+                    if 0 <= chosen_id < len(node_ids):
+                        actor_id = self.update_actor_node(
+                            node, node_ids[chosen_id], bool(decision.get("update_name"))
+                        )
+                        return True, actor_id
+                except Exception as exc:
+                    print(f"Actor merge skipped after reasoning error: {exc}")
 
         return merge_occurred, None
 
@@ -1117,7 +1306,7 @@ class KGManager:
 
         # Do some sanitization
         def sanitize_value(value):
-            return "Unknown" if value != value else value
+            return "Unknown" if value is None or value != value else value
         
         name = sanitize_value(actor.name)
         actor_type = sanitize_value(actor.actor_type)
@@ -1280,7 +1469,7 @@ class KGManager:
         query = """
         MATCH (rep:Report) WHERE elementId(rep) = $rep_id
         MERGE (inc:Incident {label: $label})
-        CREATE (rep)-[:HAS_LABEL]->(inc)
+        MERGE (rep)-[:HAS_LABEL]->(inc)
         RETURN elementId(inc) as inc_id
         """
 
@@ -1293,7 +1482,13 @@ class KGManager:
             inc_id = result.single()["inc_id"]
 
         # Also add directly to the vector store
-        self.vector_db.insert_incident(inc_id, incident_label, incident_text)
+        if self.vector_db is not None:
+            try:
+                self.vector_db.insert_incident(inc_id, incident_label, incident_text)
+            except Exception as exc:
+                # Neo4j is authoritative for graph identity. A transient vector
+                # outage must not roll back or suppress the graph observation.
+                print(f"Incident vector indexing failed: {exc}")
 
         return inc_id
     
@@ -1365,61 +1560,81 @@ class KGManager:
         # Don't forget to merge the incident if similar incidents already exist
 
         # Check if this incident already exists
-        results = self.vector_db.obtain_similar_docs(incident_label)
-        result_hits = results["hits"]
+        if self.vector_db is None or not self.enable_graph_reasoning or self.llm_client is None:
+            return self.insert_incident_node(rep_id, incident)
+
+        try:
+            results = self.vector_db.obtain_similar_docs(incident_label)
+            result_hits = results.get("hits", [])
+        except Exception as exc:
+            print(f"Incident vector lookup failed; creating incident: {exc}")
+            return self.insert_incident_node(rep_id, incident)
 
 
 
         # If there's even results
         if result_hits:
 
-            results_text = str(["\nCandidate " + str(i) + "\n" + str(x) for i,x in enumerate(result_hits)])
-            
-            prompt = self.incident_linking_prompt["match_incidents"] + "\n\nincident label: " + incident_label + "\nincident text: " + incident_text + "\n\n Candidates: \n" + results_text + self.incident_linking_prompt["match_incidents_format"]
+            candidates = [
+                {"candidate_index": i, "label": hit.get("label"), "text": hit.get("text")}
+                for i, hit in enumerate(result_hits)
+            ]
+            prompt = (
+                "Compare the incoming incident with vector-search candidates. Return only JSON: "
+                '{"matches":[{"candidate_index":0,"relationship":"same|parent|child",'
+                '"reason":"..."}]}. Return an empty matches list when uncertain. A parent is a '
+                "broader incident containing the incoming incident.\n\n"
+                f"Incoming: {json.dumps({'label': incident_label, 'text': incident_text})}\n"
+                f"Candidates: {json.dumps(candidates, default=str)}"
+            )
+            try:
+                output, _ = self.llm_client.send_message_to_llm_single(prompt)
+                incident_outputs = self._json_object(output).get("matches") or []
+            except Exception as exc:
+                print(f"Incident linking skipped after reasoning error: {exc}")
+                incident_outputs = []
 
-            output, thoughts = self.llm_client.send_message_to_llm_single(prompt)
-            
-            # Split the different incidents
-            incident_text = output.split("<LIST>")[1].split("</LIST>")[0]
-            if "," in incident_text:
-                incident_outputs = incident_text.split("<NEXT>")
-            else:
-                incident_outputs = [incident_text]
+            linked = False
+            # Exact identity takes precedence over hierarchy links.
+            incident_outputs = sorted(
+                (item for item in incident_outputs if isinstance(item, dict)),
+                key=lambda item: item.get("relationship") != "same",
+            )
+            for decision in incident_outputs:
+                try:
+                    chosen_id = int(decision.get("candidate_index", -1))
+                except (TypeError, ValueError):
+                    continue
+                if not 0 <= chosen_id < len(result_hits):
+                    continue
+                chosen_incident_data = result_hits[chosen_id]
+                chosen_incident_data = {
+                    **chosen_incident_data,
+                    "id": (chosen_incident_data.get("neo4j_id")
+                           or chosen_incident_data.get("id")
+                           or chosen_incident_data.get("_id")),
+                }
+                if not chosen_incident_data["id"]:
+                    continue
+                relationship = str(decision.get("relationship") or "").lower()
+                reason_text = str(decision.get("reason") or "")
+                if relationship == "same":
+                    self.merge_incidents(rep_id, chosen_incident_data)
+                    incident.label = chosen_incident_data.get("label", incident.label)
+                    linked = True
+                    break
+                if relationship == "parent":
+                    self.add_incident_relation(
+                        rep_id, chosen_incident_data, incident, reason_text, isparent=True
+                    )
+                    linked = True
+                elif relationship == "child":
+                    self.add_incident_relation(
+                        rep_id, chosen_incident_data, incident, reason_text, isparent=False
+                    )
+                    linked = True
 
-            # Always put the "SAME" first
-            incident_outputs = sorted(incident_outputs, key=lambda s: "<SAME>" not in s)
-
-            for inc_output in incident_outputs:
-
-                print(inc_output)
-
-                # Parse the output
-                chosen_id = int(inc_output.split("<INCIDENT>")[1].split("</INCIDENT>")[0])
-                if chosen_id > -1:  # We have a relation
-
-                    chosen_incident_data = result_hits[chosen_id]
-                    if "<SAME>" in inc_output:
-                        self.merge_incidents(rep_id, chosen_incident_data)
-                        incident.label = chosen_incident_data['label']
-                        
-                    elif "<PARENT>" in inc_output:
-                        
-                        # Get the reasoning
-                        reason_text = ""
-                        if "WHY" in inc_output:
-                            reason_text = inc_output.split("<WHY>")[1].split("</WHY>")[0]
-
-                        self.add_incident_relation(rep_id, chosen_incident_data, incident, reason_text, isparent=True)
-                    elif "<CHILD>" in inc_output:
-
-                        # Get the reasoning
-                        reason_text = ""
-                        if "WHY" in inc_output:
-                            reason_text = inc_output.split("<WHY>")[1].split("</WHY>")[0]
-
-                        self.add_incident_relation(rep_id, chosen_incident_data, incident, reason_text, isparent=False)
-
-            else:
+            if not linked:
                 self.insert_incident_node(rep_id, incident)
 
         else:  # No result, then add to graph

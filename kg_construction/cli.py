@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     selection = import_parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--date", action="append", help="YYYYMMDD; repeat for multiple days")
     selection.add_argument("--latest", action="store_true", help="import the newest available day")
+
+    stream_parser = subparsers.add_parser(
+        "ingest-stream", help="ingest enriched common-model JSONL into SQL and Neo4j"
+    )
+    stream_parser.add_argument("--input", required=True, type=Path)
     return parser
 
 
@@ -112,6 +117,11 @@ def main(argv=None) -> int:
                 print(f"ERROR: {error}")
             return 1
         print("Configuration paths and required settings are valid.")
+        return 0
+
+    if args.command == "ingest-stream":
+        from kg_construction.stream_ingestion import ingest_jsonl
+        print(f"Ingested {ingest_jsonl(args.input)} observations")
         return 0
 
     source_folder, _ = SOURCE_MODULES[args.source]

@@ -5,7 +5,14 @@ from utilities.util import get_config
 
 class ImageCaptioner:
 
-    def __init__(self):
+    def __init__(self, *, allow_local_enrichment=False):
+
+        if not allow_local_enrichment and os.environ.get("SIGMUS_ALLOW_LEGACY_LOCAL_ENRICHMENT") != "1":
+            raise RuntimeError(
+                "SIGMUS-local image captioning is a legacy compatibility path. "
+                "Use shared Urban Observations annotations, or explicitly set "
+                "SIGMUS_ALLOW_LEGACY_LOCAL_ENRICHMENT=1."
+            )
 
         # Get config data
         self.config = get_config()
