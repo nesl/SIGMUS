@@ -1,4 +1,4 @@
-"""Continuously ingest complete JSONL records appended by Urban Observations."""
+"""Continuously store complete JSONL records appended by Urban Observations."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import time
 
 from urban_observation_model import Observation
 
-from kg_construction.db_manager import KGManager
-from kg_construction.stream_ingestion import ObservationStore
-from observation_adapter import to_sigmus_record
+from .graph import Neo4jStore
+from .observation import to_storage_record
+from .timescale import TimescaleStore
 
 
 class StreamWorker:
@@ -22,8 +22,8 @@ class StreamWorker:
         self.state_path = state_path
         self.poll_seconds = poll_seconds
         self.health_path = health_path
-        self.sql = sql_store or ObservationStore()
-        self.graph = graph or KGManager(use_vectordb=True, enable_graph_reasoning=True)
+        self.sql = sql_store or TimescaleStore()
+        self.graph = graph or Neo4jStore()
         self.running = True
 
     def _offset(self) -> int:
@@ -43,8 +43,7 @@ class StreamWorker:
         if not self.input_path.exists():
             return 0
         offset = self._offset()
-        size = self.input_path.stat().st_size
-        if offset > size:  # The producer rotated or truncated the output file.
+        if offset > self.input_path.stat().st_size:
             offset = 0
         count = 0
         with self.input_path.open("rb") as stream:
@@ -55,16 +54,14 @@ class StreamWorker:
                 if not line:
                     break
                 if not line.endswith(b"\n"):
-                    # Do not consume a partially appended JSON object.
                     stream.seek(start)
                     break
                 if not line.strip():
                     self._save_offset(stream.tell())
                     continue
-                observation = Observation.from_json(line.decode("utf-8"))
-                record = to_sigmus_record(observation)
+                record = to_storage_record(Observation.from_json(line.decode("utf-8")))
                 self.sql.upsert(record)
-                self.graph.insert_common_observation(record)
+                self.graph.insert_observation(record)
                 self._save_offset(stream.tell())
                 count += 1
         return count
@@ -73,14 +70,12 @@ class StreamWorker:
         while self.running:
             try:
                 count = self.run_once()
-                if self.health_path is not None:
+                if self.health_path:
                     self.health_path.parent.mkdir(parents=True, exist_ok=True)
                     self.health_path.touch()
                 if count:
                     print(f"Ingested {count} enriched observations", flush=True)
             except Exception as exc:
-                # The offset advances only after both database projections, so
-                # an interrupted record is safely retried via idempotent writes.
                 print(f"Ingestion retry after error: {exc}", flush=True)
             if self.running:
                 time.sleep(self.poll_seconds)
@@ -89,7 +84,7 @@ class StreamWorker:
         self.running = False
 
     def close(self):
-        self.graph.close_driver()
+        self.graph.close()
         self.sql.close()
 
 

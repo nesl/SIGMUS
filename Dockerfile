@@ -20,4 +20,4 @@ RUN useradd --create-home --uid 10001 sigmus \
     && chown -R sigmus:sigmus /state /streams
 USER sigmus
 
-CMD ["python", "-m", "kg_construction.stream_worker"]
+CMD ["python", "-m", "database_storage.worker"]

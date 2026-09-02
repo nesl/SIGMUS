@@ -1,5 +1,0 @@
-{
-"choose_actors":"For this task, you will be given an actor (aka some person).  Then, I will provide a list of candidate actors, and you must decide if the given actor is actually the same person as the previous list of candidate actors.  ",
-"choose_actors_format": "To format your answer, please simply choose the candidate number and place it in between <ACTOR></ACTOR>  For example, if you believe the first candidate is the same person, you would write: <ACTOR>0</ACTOR>.  In addition, if you believe that the given actor is the most informative (e.g. has the most informative name), then please ALSO write <UPDATE_NAME> after your output (e.g. <ACTOR>0</ACTOR><UPDATE_NAME>).  For example, if the given actor is 'Bob Roger Mann' and the best candidate is 'Bob Mann' or 'Bob Roger', then use <UPDATE_NAME>.  If you do not believe any of the candidates are the same person, please write: <ACTOR>-1</ACTOR>."
-
-}

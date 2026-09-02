@@ -1,5 +1,5 @@
 from urban_observation_model import Observation, SCHEMA_VERSION
-from observation_adapter import to_sigmus_record
+from database_storage.observation import to_storage_record
 
 
 def test_completed_shared_enrichment_maps_without_model_or_geocoder():
@@ -13,7 +13,7 @@ def test_completed_shared_enrichment_maps_without_model_or_geocoder():
             "incidents": [{"name": "fire", "score": .9}],
         },
     })
-    record = to_sigmus_record(observation)
+    record = to_storage_record(observation)
     assert record["event"]["name"] == "Fire"
     assert record["latitude"] == 34.0
     assert record["entities"][0]["name"] == "LAFD"
@@ -25,7 +25,7 @@ def test_unenriched_observation_is_not_locally_interpreted():
         "time": "2026-09-02T12:00:00Z", "sensor": "email", "data": {}, "files": [],
     })
     try:
-        to_sigmus_record(observation)
+        to_storage_record(observation)
         assert False, "expected authoritative-enrichment requirement"
     except ValueError as exc:
-        assert "enrichment service" in str(exc)
+        assert "processing service" in str(exc)

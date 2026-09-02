@@ -1,15 +1,9 @@
 {
-  "save_folder": "/absolute/path/to/pulled_data",
   "enriched_stream_path": "../urban-observations/processing-output/observations.jsonl",
   "mcp_port": 8006,
   "neo4j_browser_port": 7474,
-  "cctv_locations": "/absolute/path/to/sigmus/resources/cctv.kml",
-  "owm_locations": "/absolute/path/to/sigmus/resources/owm_locations.txt",
-  "google_places_key": {"key": "replace_me"},
   "postgres_config": {"dbname": "sigmus", "user": "sigmus", "password": "replace_me", "host": "localhost", "port": 5432},
-  "seaweedfs_config": {"endpoint": "http://localhost:8333"},
   "marqo_config": {"uri": "http://localhost:8882"},
   "neo4j_config": {"uri": "bolt://localhost:7687", "username": "neo4j", "password": "replace_me"},
-  "openai": {"api": "replace_me", "model": "gpt-4o-mini", "qa_model": "gpt-4o-mini"},
-  "vlm_host": {"uri": "http://localhost:8000"}
+  "openai": {"api": "replace_me", "model": "gpt-4o-mini", "qa_model": "gpt-4o-mini"}
 }

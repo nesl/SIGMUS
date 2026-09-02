@@ -1,4 +1,4 @@
-"""Read shared enrichment without invoking observation-level models or geocoders."""
+"""Validate and map the shared model into SIGMUS storage fields."""
 
 from __future__ import annotations
 
@@ -8,27 +8,25 @@ from typing import Iterator
 from urban_observation_model import Observation
 
 
-def to_sigmus_record(observation: Observation) -> dict:
+def to_storage_record(observation: Observation) -> dict:
     value = observation.value
     annotations = value.get("annotations") or {}
     enrichment = annotations.get("enrichment") or {}
-    status = enrichment.get("status")
-    if status not in {"completed", "skipped_by_anomaly"}:
+    if enrichment.get("status") not in {"completed", "skipped_by_anomaly"}:
         raise ValueError(
             f"observation {observation.id} has no authoritative shared enrichment; "
-            "send it through the Urban Observations enrichment service first"
+            "send it through the Urban Observations processing service first"
         )
-    location = annotations.get("location") if isinstance(annotations.get("location"), dict) else {}
-    latitude = location.get("latitude", value.get("latitude"))
-    longitude = location.get("longitude", value.get("longitude"))
+    location = annotations.get("location")
+    location = location if isinstance(location, dict) else {}
     return {
         "id": observation.id,
         "source": value["source"],
         "time": value["time"],
         "end_time": value.get("end_time"),
         "sensor": value["sensor"],
-        "latitude": latitude,
-        "longitude": longitude,
+        "latitude": location.get("latitude", value.get("latitude")),
+        "longitude": location.get("longitude", value.get("longitude")),
         "data": dict(value["data"]),
         "files": observation.files,
         "event": dict(annotations.get("event") or {}),
@@ -46,4 +44,4 @@ def iter_jsonl(path: str | Path) -> Iterator[dict]:
     with Path(path).open(encoding="utf-8") as stream:
         for line in stream:
             if line.strip():
-                yield to_sigmus_record(Observation.from_json(line))
+                yield to_storage_record(Observation.from_json(line))

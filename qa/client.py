@@ -13,7 +13,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from openai import OpenAI
 
-from utilities.util import get_config
+from database_storage.config import get_config
 
 
 SYSTEM_PROMPT = """You answer questions using the SIGMUS urban-observation evidence tools.

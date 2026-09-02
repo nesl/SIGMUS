@@ -10,7 +10,7 @@ from typing import Any
 import psycopg2
 from neo4j import GraphDatabase
 
-from utilities.util import get_config
+from database_storage.config import get_config
 
 
 def _plain(value: Any) -> Any:

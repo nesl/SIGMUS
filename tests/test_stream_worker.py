@@ -1,6 +1,6 @@
 import json
 
-from kg_construction.stream_worker import StreamWorker
+from database_storage.worker import StreamWorker
 
 
 class Store:
@@ -10,7 +10,7 @@ class Store:
 
 class Graph:
     def __init__(self): self.ids = []
-    def insert_common_observation(self, record): self.ids.append(record["id"])
+    def insert_observation(self, record): self.ids.append(record["id"])
 
 
 def record(identifier="worker-test"):

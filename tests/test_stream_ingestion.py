@@ -1,4 +1,4 @@
-from kg_construction import stream_ingestion
+from database_storage import ingestion
 
 
 class FakeStore:
@@ -18,20 +18,20 @@ class FakeGraph:
         self.records = []
         self.closed = False
 
-    def insert_common_observation(self, record):
+    def insert_observation(self, record):
         self.records.append(record)
 
-    def close_driver(self):
+    def close(self):
         self.closed = True
 
 
 def test_enriched_stream_is_sent_to_sql_and_graph(monkeypatch):
     records = [{"id": "obs-1"}, {"id": "obs-2"}]
-    monkeypatch.setattr(stream_ingestion, "iter_jsonl", lambda path: iter(records))
+    monkeypatch.setattr(ingestion, "iter_jsonl", lambda path: iter(records))
     sql = FakeStore()
     graph = FakeGraph()
 
-    count = stream_ingestion.ingest_jsonl("unused.jsonl", sql_store=sql, graph=graph)
+    count = ingestion.ingest_jsonl("unused.jsonl", sql_store=sql, graph=graph)
 
     assert count == 2
     assert sql.records == records

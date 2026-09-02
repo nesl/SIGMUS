@@ -66,7 +66,7 @@ services:
         target: /streams
         read_only: true
       - ingestion-state:/state
-    command: ["python", "-m", "kg_construction.stream_worker", "--input", "/streams/${SIGMUS_STREAM_FILE:-observations.jsonl}"]
+    command: ["python", "-m", "database_storage.worker", "--input", "/streams/${SIGMUS_STREAM_FILE:-observations.jsonl}"]
     healthcheck:
       test: ["CMD-SHELL", "test -f /state/healthy"]
       interval: 10s

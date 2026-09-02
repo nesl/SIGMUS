@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sigmus"
 version = "0.1.0"
-description = "Multimodal urban knowledge-graph construction and integration"
+description = "Storage and question answering for enriched urban observations"
 requires-python = ">=3.10"
 dependencies = [
     "urban-observations>=0.1,<1",
@@ -14,10 +14,11 @@ dependencies = [
 [project.scripts]
 sigmus-mcp = "qa.mcp_server:main"
 sigmus-ask = "qa.client:main"
+sigmus-ingest = "database_storage.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kg_construction*", "llm*", "utilities*", "observation_adapter*", "qa*"]
+include = ["database_storage*", "qa*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.txt"]

@@ -1,17 +1,6 @@
-boto3==1.35.70
 fuzzywuzzy==0.18.0
-googlemaps==4.10.0
-lxml-html-clean>=0.4,<1
 marqo==3.11.0
 mcp>=1.27,<2
 neo4j==5.26.0
-newspaper3k==0.2.8
-numpy==2.1.3
 openai==1.75.0
-pandas==2.2.3
 psycopg2-binary==2.9.10
-pytest>=8,<9
-python-dateutil==2.9.0.post0
-pytz==2024.2
-requests>=2.32,<3
-tqdm==4.67.1
