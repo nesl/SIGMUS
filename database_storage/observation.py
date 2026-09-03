@@ -35,6 +35,7 @@ def to_storage_record(observation: Observation) -> dict:
         "relations": list(annotations.get("relations") or []),
         "effects": list(annotations.get("effects") or []),
         "incidents": list(annotations.get("incidents") or []),
+        "news_incidents": list(annotations.get("news_incidents") or []),
         "anomaly": dict(annotations.get("anomaly") or {}),
         "enrichment": dict(enrichment),
     }

@@ -63,7 +63,7 @@ class TimescaleStore:
     def upsert(self, record):
         annotation_keys = (
             "event", "summary", "entities", "relations", "effects",
-            "incidents", "anomaly", "enrichment",
+            "incidents", "news_incidents", "anomaly", "enrichment",
         )
         with self.connection.cursor() as cursor:
             cursor.execute("""

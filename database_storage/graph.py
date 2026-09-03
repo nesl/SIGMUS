@@ -12,6 +12,14 @@ from .reasoning import GraphReasoner
 from .vector import MarqoStore
 
 
+NEWS_SOURCES = frozenset({"gdelt", "news"})
+
+
+def originates_incidents(source: object) -> bool:
+    """Only news reports may introduce incident nodes into the SIGMUS graph."""
+    return str(source or "").strip().lower() in NEWS_SOURCES
+
+
 class Neo4jStore:
     def __init__(self, *, driver=None, reasoner=None, vector_store=None,
                  enable_reasoning: bool = True):
@@ -46,8 +54,16 @@ class Neo4jStore:
         summary = str(record.get("summary") or event.get("description") or "")
         incidents = [self._name(item) for item in record.get("incidents", [])]
         incidents = [name for name in incidents if name]
+        news_incidents = [self._name(item) for item in record.get("news_incidents", [])]
+        news_incidents = [name for name in news_incidents if name]
+        # Compatibility for enriched v1 news: its event name was the only
+        # event-specific value. Never fall back to generic incident candidates.
+        if not news_incidents and originates_incidents(record.get("source")):
+            legacy_event_name = self._name(event.get("name"))
+            if legacy_event_name:
+                news_incidents = [legacy_event_name]
         annotations = {key: record.get(key) for key in (
-            "event", "summary", "entities", "relations", "effects", "incidents",
+            "event", "summary", "entities", "relations", "effects", "incidents", "news_incidents",
             "anomaly", "enrichment",
         )}
         with self.driver.session() as session:
@@ -114,11 +130,16 @@ class Neo4jStore:
                 """, subject=subject, object=object_id, observation_id=record["id"],
                     predicate=str(relation.get("predicate") or "related_to"))
 
-        for label in incidents:
-            self._link_incident(report_id, label, summary)
+        # In the SIGMUS ontology, an Incident is introduced by a news report.
+        # Other modalities retain their possible-incident annotations for
+        # TimescaleDB and may corroborate news through report relationships,
+        # but they must not originate graph Incident nodes.
+        if originates_incidents(record.get("source")):
+            for label in news_incidents:
+                self._link_incident(report_id, label, summary)
 
         enrichment = record.get("enrichment") or {}
-        semantic = bool(summary or event or incidents or record.get("effects"))
+        semantic = bool(summary or event or incidents or news_incidents or record.get("effects"))
         if (self.enable_reasoning and semantic
                 and enrichment.get("status") != "skipped_by_anomaly"):
             self._link_cross_modality(report_id, record)
@@ -278,7 +299,7 @@ class Neo4jStore:
             return
         incoming = {key: record.get(key) for key in (
             "id", "source", "time", "latitude", "longitude", "summary",
-            "event", "incidents", "effects",
+            "event", "incidents", "news_incidents", "effects",
         )}
         prompt = (
             "Choose candidates that corroborate the same real-world event. Return only JSON: "

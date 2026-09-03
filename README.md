@@ -142,6 +142,15 @@ that depends on existing graph context:
 - incident identity and hierarchy linking; and
 - cross-modality corroboration links.
 
+Only real GDELT (`gdelt`) and synthetic news (`news`) reports may originate an
+`Incident` node. The shared `incidents` annotation remains a generic candidate
+list used by IncidentLens. News enrichment additionally supplies event-specific
+labels in `news_incidents`; SIGMUS uses only that field to construct incidents.
+Marqo and the LLM then decide whether each news incident is new, the same as an
+existing incident, or part of an incident hierarchy. Other sources retain their
+candidate annotations in TimescaleDB but do not create graph incidents. They
+connect to news evidence through cross-modality corroboration.
+
 Neo4j remains authoritative if optional LLM or Marqo linking fails.
 
 For a one-time import instead of following the stream:
