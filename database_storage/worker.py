@@ -10,9 +10,7 @@ import time
 
 from urban_observation_model import Observation
 
-from .graph import Neo4jStore
 from .observation import to_storage_record
-from .timescale import TimescaleStore
 
 
 class StreamWorker:
@@ -22,8 +20,14 @@ class StreamWorker:
         self.state_path = state_path
         self.poll_seconds = poll_seconds
         self.health_path = health_path
-        self.sql = sql_store or TimescaleStore()
-        self.graph = graph or Neo4jStore()
+        if sql_store is None:
+            from .timescale import TimescaleStore
+            sql_store = TimescaleStore()
+        if graph is None:
+            from .graph import Neo4jStore
+            graph = Neo4jStore()
+        self.sql = sql_store
+        self.graph = graph
         self.running = True
 
     def _offset(self) -> int:

@@ -8,9 +8,9 @@ WORKDIR /build
 COPY requirements.txt /build/sigmus/requirements.txt
 RUN pip install --no-cache-dir -r /build/sigmus/requirements.txt
 
-COPY --from=urban_observations / /build/urban-observations
+COPY --from=observation_processing / /build/urban-observation-processing
 COPY . /build/sigmus
-RUN pip install --no-cache-dir --no-deps /build/urban-observations \
+RUN pip install --no-cache-dir --no-deps /build/urban-observation-processing \
     && pip install --no-cache-dir --no-deps /build/sigmus \
     && rm -rf /build
 

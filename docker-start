@@ -39,7 +39,7 @@ def require(section, key):
         raise SystemExit(f"config.json requires a real value for {section}.{key}")
     return str(value)
 
-stream_value = config.get("enriched_stream_path", "../urban-observations/processing-output/observations.jsonl")
+stream_value = config.get("enriched_stream_path", "../urban-observation-processing/processing-output/observations.jsonl")
 stream = Path(stream_value).expanduser()
 if not stream.is_absolute():
     stream = (repo / stream).resolve()

@@ -1,5 +1,5 @@
 {
-  "enriched_stream_path": "../urban-observations/processing-output/observations.jsonl",
+  "enriched_stream_path": "../urban-observation-processing/processing-output/observations.jsonl",
   "mcp_port": 8006,
   "neo4j_browser_port": 7474,
   "postgres_config": {"dbname": "sigmus", "user": "sigmus", "password": "replace_me", "host": "localhost", "port": 5432},

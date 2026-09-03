@@ -5,11 +5,11 @@ related graph records with Marqo and an LLM, and provides a Q/A interface over
 the stored data.
 
 SIGMUS does not collect raw data or perform observation-level enrichment. The
-sibling [Urban Observations](../urban-observations) repository owns collection,
-replay, the shared data model, the receiver, and enrichment.
+sibling `urban-observation-processing` repository owns replay, the shared data
+model, receiving, and enrichment. `urban-observations` owns collection.
 
 ```text
-Urban Observations processing
+Urban Observation Processing
             │
             ▼
     observations.jsonl
@@ -38,7 +38,7 @@ docker-start        Configuration-aware Compose wrapper
 ```
 
 There are no source-specific importers in SIGMUS. Historical and current raw
-files must first pass through Urban Observations replay and processing to
+files must first pass through shared replay and processing to
 produce the shared enriched stream.
 
 ## Containers
@@ -56,22 +56,28 @@ produce the shared enriched stream.
 Marqo is approximately 7.7 GB compressed and 15 GB unpacked because its image
 includes Vespa and CUDA/ML dependencies.
 
+SIGMUS itself needs **one routine command**, `./docker-start up`, which starts
+all five containers. Asking a question is an additional optional host Python
+command. On a new checkout, configuration and startup use three commands
+(`cp`, `chmod`, and `./docker-start up`); the Q/A virtual environment has its
+own one-time installation block below.
+
 ## Installation
 
 Check out both repositories as siblings because the SIGMUS image installs the
-shared model directly from Urban Observations:
+shared model directly from Urban Observation Processing:
 
 ```text
 <parent>/
-├── urban-observations/
+├── urban-observation-processing/
 └── sigmus/
 ```
 
 Start the receiver and enrichment services on the analysis machine:
 
 ```bash
-cd ../urban-observations
-./docker-start processing-up
+cd ../urban-observation-processing
+./docker-start up
 ```
 
 Then configure SIGMUS:
@@ -83,7 +89,7 @@ chmod 600 config.json
 ```
 
 Replace every `replace_me` value and point `enriched_stream_path` to the JSONL
-file produced by Urban Observations. `config.json` is ignored by Git and no
+file produced by Urban Observation Processing. `config.json` is ignored by Git and no
 `.env` file is required.
 
 | Setting | Purpose |
@@ -124,8 +130,11 @@ added.
 The ingestion worker follows appended complete JSONL records. It advances its
 durable byte offset only after both database writes succeed, so interrupted
 records are retried. Observation IDs are upserted and can safely be replayed.
+Synthetic observations require no alternate importer after shared enrichment.
+SIGMUS and IncidentLens keep independent offset files, so both can follow one
+`observations.jsonl` without consuming or interfering with each other's records.
 
-Urban Observations has already produced event, entity, relation, location,
+Shared processing has already produced event, entity, relation, location,
 effect, incident, anomaly, and summary annotations. SIGMUS adds only reasoning
 that depends on existing graph context:
 
@@ -139,7 +148,7 @@ For a one-time import instead of following the stream:
 
 ```bash
 python -m database_storage.cli ingest-stream \
-  --input ../urban-observations/processing-output/observations.jsonl
+  --input ../urban-observation-processing/processing-output/observations.jsonl
 ```
 
 The equivalent installed command is `sigmus-ingest`.
@@ -159,7 +168,7 @@ configured model call those tools.
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install -e ../urban-observations
+pip install -e ../urban-observation-processing
 pip install -r requirements.txt
 pip install --no-deps --no-build-isolation -e .
 
@@ -177,8 +186,8 @@ The safe example in `qa/fixtures/multisource.jsonl` has suggested questions in
 ## Troubleshooting
 
 - If `config.json` is missing, copy `config.example.json` and edit it.
-- If the image cannot find Urban Observations, confirm the sibling directory is
-  named `urban-observations`.
+- If the image cannot find the shared package, confirm the sibling directory is
+  named `urban-observation-processing`.
 - If ingestion is unhealthy, verify `enriched_stream_path` and inspect
   `./docker-start logs ingestion`.
 - A Neo4j volume retains the password used at its first initialization.

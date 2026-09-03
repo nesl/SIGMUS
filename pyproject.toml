@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Storage and question answering for enriched urban observations"
 requires-python = ">=3.10"
 dependencies = [
-    "urban-observations>=0.1,<1",
+    "urban-observation-processing>=0.1,<1",
 ]
 
 [project.scripts]

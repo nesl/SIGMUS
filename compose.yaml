@@ -3,7 +3,7 @@ x-app: &app
     context: .
     dockerfile: Dockerfile
     additional_contexts:
-      urban_observations: ../urban-observations
+      observation_processing: ../urban-observation-processing
   image: sigmus:local
   restart: unless-stopped
   volumes:
