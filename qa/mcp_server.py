@@ -28,10 +28,12 @@ def service() -> QueryService:
 @mcp.tool()
 def search_reports(source: str | None = None, start: str | None = None,
                    end: str | None = None, event_type: str | None = None,
-                   text: str | None = None, limit: int = 20) -> list[dict]:
-    """Find bounded report summaries by source, ISO time range, event type, or text."""
+                   text: str | None = None, anomalous: bool | None = None,
+                   limit: int = 20) -> list[dict]:
+    """Find reports newest-first, optionally filtering Data anomaly status. Latest: no filters, limit=1."""
     return service().search_reports(source=source, start=start, end=end,
-                                    event_type=event_type, text=text, limit=limit)
+                                    event_type=event_type, text=text,
+                                    anomalous=anomalous, limit=limit)
 
 
 @mcp.tool()
@@ -41,9 +43,10 @@ def get_report(observation_id: str) -> dict | None:
 
 
 @mcp.tool()
-def find_related_reports(observation_id: str, limit: int = 20) -> list[dict]:
-    """Find reports connected through incidents, actors, or corroboration."""
-    return service().find_related_reports(observation_id, limit)
+def find_related_reports(observation_id: str, limit: int = 20,
+                         different_source: bool = False) -> list[dict]:
+    """Find related reports with relationship type, evidence, confidence, and report context."""
+    return service().find_related_reports(observation_id, limit, different_source)
 
 
 @mcp.tool()

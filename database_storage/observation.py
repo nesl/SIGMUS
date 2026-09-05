@@ -19,6 +19,10 @@ def to_storage_record(observation: Observation) -> dict:
         )
     location = annotations.get("location")
     location = location if isinstance(location, dict) else {}
+    raw = value.get("raw") if isinstance(value.get("raw"), dict) else {}
+    filepath = raw.get("path")
+    if filepath and raw.get("member"):
+        filepath = f"{filepath}#{raw['member']}"
     return {
         "id": observation.id,
         "source": value["source"],
@@ -27,8 +31,11 @@ def to_storage_record(observation: Observation) -> dict:
         "sensor": value["sensor"],
         "latitude": location.get("latitude", value.get("latitude")),
         "longitude": location.get("longitude", value.get("longitude")),
+        "location": dict(location),
         "data": dict(value["data"]),
         "files": observation.files,
+        "filepath": filepath,
+        "raw": dict(raw),
         "event": dict(annotations.get("event") or {}),
         "summary": annotations.get("summary"),
         "entities": list(annotations.get("entities") or []),

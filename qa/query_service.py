@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import json
+import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from neo4j import GraphDatabase
@@ -17,6 +19,11 @@ def _plain(value: Any) -> Any:
     """Convert driver-specific values into JSON-compatible values."""
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    # Neo4j temporal values intentionally mirror datetime without subclassing
+    # it. Convert them before the generic mapping/sequence handling below.
+    iso_format = getattr(value, "iso_format", None)
+    if callable(iso_format):
+        return iso_format()
     if isinstance(value, dict):
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -44,6 +51,7 @@ class QueryService:
 
     def __init__(self, *, sql_connection=None, graph_driver=None, vector_client=None):
         config = get_config()
+        self.display_timezone = ZoneInfo(config.get("timezone", "America/Los_Angeles"))
         self.sql = sql_connection or psycopg2.connect(**config["postgres_config"])
         neo = config["neo4j_config"]
         self.graph = graph_driver or GraphDatabase.driver(
@@ -69,6 +77,29 @@ class QueryService:
     def _field(cls, field: str) -> str:
         return cls.FIELD_ALIASES.get(field.lower(), field)
 
+    def _report_time(self, row: dict) -> dict:
+        """Expose one canonical instant in UTC and the configured display zone."""
+        text = str(row.get("time") or "")
+        if not text:
+            return row
+        try:
+            # Neo4j renders nanoseconds; Python 3.10 accepts at most six
+            # fractional digits in fromisoformat.
+            parseable = re.sub(r"(\.\d{6})\d+(?=(?:[+-]\d\d:\d\d|Z)$)", r"\1", text)
+            instant = datetime.fromisoformat(parseable.replace("Z", "+00:00"))
+            if instant.tzinfo is None:
+                # Legacy records were produced from UTC-normalized readers but
+                # stored without a type marker. Treat them as UTC explicitly.
+                instant = instant.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return row
+        utc = instant.astimezone(timezone.utc)
+        row["time"] = utc.isoformat().replace("+00:00", "Z")
+        row["time_utc"] = row["time"]
+        row["time_local"] = instant.astimezone(self.display_timezone).isoformat()
+        row["timezone"] = self.display_timezone.key
+        return row
+
     @contextmanager
     def _cursor(self):
         previous = self.sql.autocommit
@@ -84,11 +115,13 @@ class QueryService:
 
     def search_reports(self, *, source: str | None = None, start: str | None = None,
                        end: str | None = None, event_type: str | None = None,
-                       text: str | None = None, limit: int = 20) -> list[dict]:
+                       text: str | None = None, anomalous: bool | None = None,
+                       limit: int = 20) -> list[dict]:
         rows = []
         with self.graph.session() as session:
             result = session.run("""
                 MATCH (r:Report)
+                MATCH (r)-[:HAS_DATA]->(d:Data)
                 WHERE r.observation_id IS NOT NULL
                   AND ($source IS NULL OR r.source = $source)
                   AND ($start IS NULL OR datetime(r.time) >= datetime($start))
@@ -96,14 +129,23 @@ class QueryService:
                   AND ($event_type IS NULL OR toLower(r.event_type) = toLower($event_type))
                   AND ($text IS NULL OR all(token IN split(toLower($text), ' ')
                        WHERE toLower(coalesce(r.summary,'')) CONTAINS token))
+                  AND ($anomalous IS NULL OR coalesce(d.is_anomaly, false) = $anomalous)
+                OPTIONAL MATCH (r)-[:OCCURRED_AT]->(g:GeoEntity)
                 RETURN r.observation_id AS observation_id, r.source AS source,
                        r.time AS time, r.summary AS summary, r.event_name AS event_name,
                        r.event_type AS event_type, r.latitude AS latitude,
-                       r.longitude AS longitude, r.incident_names AS incidents
-                ORDER BY r.time DESC LIMIT $limit
+                       r.longitude AS longitude, r.incident_names AS incidents,
+                       r.candidate_incident_names AS candidate_incidents,
+                       d.anomaly_score AS anomaly_score, d.is_anomaly AS is_anomaly,
+                       d.enrichment_status AS enrichment_status,
+                       g.name AS location_name, d.filepath AS filepath
+                ORDER BY datetime(r.time) DESC,
+                         CASE WHEN g.name IS NULL OR trim(g.name) = '' THEN 1 ELSE 0 END,
+                         r.observation_id
+                LIMIT $limit
             """, source=source, start=start, end=end, event_type=event_type,
-                text=text, limit=self._limit(limit))
-            rows = [_plain(dict(row)) for row in result]
+                text=text, anomalous=anomalous, limit=self._limit(limit))
+            rows = [self._report_time(_plain(dict(row))) for row in result]
         return rows
 
     def get_report(self, observation_id: str) -> dict | None:
@@ -123,18 +165,35 @@ class QueryService:
             """, observation_id=observation_id).single()
         return _plain(dict(row)) if row else None
 
-    def find_related_reports(self, observation_id: str, limit: int = 20) -> list[dict]:
+    def find_related_reports(self, observation_id: str, limit: int = 20,
+                             different_source: bool = False) -> list[dict]:
         with self.graph.session() as session:
             result = session.run("""
                 MATCH (origin:Report {observation_id:$observation_id})
-                MATCH (origin)-[:HAS_LABEL|MENTIONS|CORROBORATES*1..2]-(related:Report)
+                MATCH path=(origin)-[:HAS_LABEL|MENTIONS|CORROBORATES*1..2]-(related:Report)
                 WHERE related <> origin AND related.observation_id IS NOT NULL
+                  AND (NOT $different_source OR related.source <> origin.source)
+                WITH related, path,
+                     head([node IN nodes(path) WHERE node:LLM_CONTEXT]) AS context
+                OPTIONAL MATCH (related)-[:HAS_DATA]->(data:Data)
+                OPTIONAL MATCH (related)-[:OCCURRED_AT]->(geo:GeoEntity)
                 RETURN DISTINCT related.observation_id AS observation_id,
                        related.source AS source, related.time AS time,
-                       related.summary AS summary, related.event_type AS event_type
+                       related.summary AS summary, related.event_type AS event_type,
+                       CASE
+                         WHEN context IS NOT NULL THEN 'llm_corroboration'
+                         WHEN any(edge IN relationships(path) WHERE type(edge)='HAS_LABEL')
+                           THEN 'shared_confirmed_incident'
+                         ELSE 'shared_actor'
+                       END AS relationship_type,
+                       context.confidence AS confidence, context.reason AS reason,
+                       properties(context)['distance_meters'] AS distance_meters,
+                       properties(context)['time_delta_seconds'] AS time_delta_seconds,
+                       geo.name AS location_name, data.filepath AS filepath
                 ORDER BY related.time DESC LIMIT $limit
-            """, observation_id=observation_id, limit=self._limit(limit))
-            return [_plain(dict(row)) for row in result]
+            """, observation_id=observation_id, different_source=different_source,
+                limit=self._limit(limit))
+            return [self._report_time(_plain(dict(row))) for row in result]
 
     def search_incidents(self, query: str, limit: int = 10) -> list[dict]:
         limit = self._limit(limit)

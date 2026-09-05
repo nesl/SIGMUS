@@ -31,7 +31,22 @@ an earlier baseline; if only one point is available, report its value without cl
 Measurement query start and end timestamps are inclusive.
 Never replace missing report summaries or timestamps with plausible-sounding text. Canonical
 sources are air, alertcalifornia, cctv, citizen, gdelt, pems, twitter, and weather. Common fields
-include pm2.5_atm, humidity, temperature, wind_speed, and wind_direction; aliases are accepted."""
+include pm2.5_atm, humidity, temperature, wind_speed, and wind_direction; aliases are accepted.
+search_reports is ordered newest-first; use it with limit=1 and no filters for the most recent
+report. When reporting time, use time_local and state its timezone while retaining time_utc as the
+canonical instant. Use anomalous=true to discover reports explicitly marked anomalous. When that
+search returns results, you must call get_report for every selected anomalous report (up to 10)
+before answering, and use its full Data annotations for diagnostics. For questions about the complete set
+or whether multiple sources are represented, call search_reports with limit=100 first; do not
+generalize from one latest report. Investigate cross-source connections with find_related_reports
+using different_source=true
+for relevant representatives returned by that broad search. Treat llm_corroboration as a proposed
+evidence link, not a confirmed incident; explain its reason, confidence, distance, and time delta.
+Only shared_confirmed_incident means that reports share a confirmed incident, and only news reports
+can establish those Incident nodes. Sensor anomaly and incident-candidate labels are screening
+signals, not true incidents; report candidate_incidents using that exact qualification. Whenever answering with information
+about a report, include its location, configured-local and UTC times, and originating filepath when
+those values are available; explicitly say which values are unavailable rather than inventing them."""
 
 
 def _tool_result(result: Any) -> str:

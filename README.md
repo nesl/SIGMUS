@@ -27,12 +27,15 @@ Urban Observation Processing
 ```
 
 The accompanying paper is available at [`docs/sigmus.pdf`](docs/sigmus.pdf).
+The implemented Neo4j model and its extension guide are documented in
+[`docs/ontology.md`](docs/ontology.md).
 
 ## Repository structure
 
 ```text
 database_storage/   Database config, TimescaleDB, Neo4j, Marqo, and ingestion
 qa/                 MCP query server and the sigmus-ask client
+docs/               Paper and implemented ontology documentation
 compose.yaml        Five-service deployment
 docker-start        Configuration-aware Compose wrapper
 ```
@@ -50,7 +53,7 @@ produce the shared enriched stream.
 | `timescaledb` | Stores complete observations and numeric time-series measurements. | `timescale-data` |
 | `neo4j` | Stores reports, incidents, actors, places, and their relationships. | `neo4j-data` |
 | `marqo` | Retrieves similar incident candidates for bounded graph-linking decisions. | `marqo-data` |
-| `ingestion` | Follows enriched JSONL and idempotently writes TimescaleDB and Neo4j. | `ingestion-state` |
+| `ingestion` | Follows enriched JSONL and idempotently writes TimescaleDB and Neo4j; vector linking is best-effort while Marqo starts. | `ingestion-state` |
 | `mcp` | Exposes bounded, read-only database tools for Q/A. | None |
 
 Marqo is approximately 7.7 GB compressed and 15 GB unpacked because its image
@@ -102,7 +105,9 @@ file produced by Urban Observation Processing. `config.json` is ignored by Git a
 | `openai.model` | Model used for actor, incident, and cross-modality linking. |
 | `openai.qa_model` | Model used by `sigmus-ask`. |
 | `mcp_port` | Local MCP port; default `8006`. |
+| `timezone` | IANA timezone used for human-readable Q/A report times; canonical storage remains UTC. | `America/Los_Angeles` |
 | `neo4j_browser_port` | Local Neo4j Browser port; default `7474`. |
+| `neo4j_bolt_port` | Local Neo4j Bolt port used by Browser; default `7687`. |
 
 Start the stack:
 
@@ -111,8 +116,16 @@ Start the stack:
 ./docker-start ps
 ```
 
-Neo4j Browser defaults to <http://localhost:7474> and MCP to
-<http://localhost:8006/mcp>. Both bind only to localhost.
+Neo4j Browser defaults to <http://localhost:7474>, its connection URL is
+`neo4j://localhost:7687`, and MCP defaults to <http://localhost:8006/mcp>.
+All three ports bind only to localhost.
+
+This localhost-only demo stack permits six-character Neo4j passwords (Neo4j's
+normal default minimum is eight). Changing `neo4j_config.password` after Neo4j
+has initialized does not change
+the password stored in its existing named volume. Change it through Neo4j
+Browser before updating `config.json`, or recreate the development volume with
+`./docker-start down --volumes` when its contents are disposable.
 
 ```bash
 ./docker-start logs -f
@@ -137,6 +150,12 @@ SIGMUS and IncidentLens keep independent offset files, so both can follow one
 Shared processing has already produced event, entity, relation, location,
 effect, incident, anomaly, and summary annotations. SIGMUS adds only reasoning
 that depends on existing graph context:
+
+The complete annotation object is retained as JSON on the connected
+`Data.annotations` property. `Report` represents the report itself and retains
+only its identifying, temporal, spatial, summary, and event projection.
+The related `GeoEntity` projects the resolved location name as `name`, along
+with its coordinates, geocoding provider, and provider place ID.
 
 - actor identity merging;
 - incident identity and hierarchy linking; and
@@ -199,6 +218,8 @@ The safe example in `qa/fixtures/multisource.jsonl` has suggested questions in
   named `urban-observation-processing`.
 - If ingestion is unhealthy, verify `enriched_stream_path` and inspect
   `./docker-start logs ingestion`.
+- If `sigmus-ask` reports an HTTP connection error, check `./docker-start ps`;
+  the `mcp` service must be running and healthy on port 8006.
 - A Neo4j volume retains the password used at its first initialization.
 - Marqo requires substantial disk space and memory and may take time to start.
 

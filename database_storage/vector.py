@@ -24,7 +24,15 @@ class MarqoStore:
         return self.client.index(self.index_name).search(q=query, limit=limit).get("hits", [])
 
     def index_incident(self, incident_id: str, label: str, text: str):
-        return self.client.index(self.index_name).add_documents([{
+        result = self.client.index(self.index_name).add_documents([{
             "_id": str(incident_id), "neo4j_id": str(incident_id),
             "label": label, "text": text,
         }], tensor_fields=["label"])
+        if result.get("errors"):
+            failures = [
+                item for item in result.get("items", [])
+                if int(item.get("status", 500)) >= 400
+            ]
+            detail = failures[0].get("message", "unknown Marqo error") if failures else result
+            raise RuntimeError(f"Marqo rejected incident {incident_id}: {detail}")
+        return result

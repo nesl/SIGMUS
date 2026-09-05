@@ -1,7 +1,9 @@
 {
+  "timezone": "America/Los_Angeles",
   "enriched_stream_path": "../urban-observation-processing/processing-output/observations.jsonl",
   "mcp_port": 8006,
   "neo4j_browser_port": 7474,
+  "neo4j_bolt_port": 7687,
   "postgres_config": {"dbname": "sigmus", "user": "sigmus", "password": "replace_me", "host": "localhost", "port": 5432},
   "marqo_config": {"uri": "http://localhost:8882"},
   "neo4j_config": {"uri": "bolt://localhost:7687", "username": "neo4j", "password": "replace_me"},

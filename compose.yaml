@@ -30,8 +30,11 @@ services:
     restart: unless-stopped
     environment:
       NEO4J_AUTH: neo4j/${SIGMUS_NEO4J_PASSWORD:?Run ./docker-start instead of docker compose directly}
+      # Local demo instance only; Neo4j defaults to a minimum of 8 characters.
+      NEO4J_dbms_security_auth__minimum__password__length: 6
     ports:
       - "127.0.0.1:${SIGMUS_NEO4J_BROWSER_PORT:-7474}:7474"
+      - "127.0.0.1:${SIGMUS_NEO4J_BOLT_PORT:-7687}:7687"
     volumes:
       - neo4j-data:/data
     healthcheck:
@@ -58,7 +61,6 @@ services:
     depends_on:
       timescaledb: {condition: service_healthy}
       neo4j: {condition: service_healthy}
-      marqo: {condition: service_healthy}
     volumes:
       - ./.runtime/config.docker.json:/app/config.json:ro
       - type: bind
@@ -78,7 +80,6 @@ services:
     depends_on:
       timescaledb: {condition: service_healthy}
       neo4j: {condition: service_healthy}
-      marqo: {condition: service_healthy}
     ports:
       - "127.0.0.1:${SIGMUS_MCP_PORT:-8006}:8006"
     environment:

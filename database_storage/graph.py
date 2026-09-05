@@ -31,7 +31,14 @@ class Neo4jStore:
         self.reasoner = reasoner or (GraphReasoner() if enable_reasoning else None)
         self.vector_store = vector_store
         if enable_reasoning and vector_store is None:
-            self.vector_store = MarqoStore()
+            try:
+                self.vector_store = MarqoStore()
+            except Exception as exc:
+                # Marqo improves candidate selection but is not authoritative.
+                # Keep ingestion available while its heavyweight service starts
+                # or when the optional vector index is temporarily unavailable.
+                print(f"Marqo unavailable; continuing without vector linking: {exc}")
+                self.vector_store = None
 
     @staticmethod
     def _name(item) -> str:
@@ -66,36 +73,57 @@ class Neo4jStore:
             "event", "summary", "entities", "relations", "effects", "incidents", "news_incidents",
             "anomaly", "enrichment",
         )}
+        location = record.get("location") if isinstance(record.get("location"), dict) else {}
+        location_name = str(location.get("formatted_address") or location.get("text") or "").strip() or None
+        anomaly = record.get("anomaly") if isinstance(record.get("anomaly"), dict) else {}
         with self.driver.session() as session:
             result = session.run("""
                 MERGE (agg:Aggregator {name: $source})
                 MERGE (obs:Observer {name: $sensor, source: $source})
                 MERGE (agg)-[:HAS_OBSERVER]->(obs)
                 MERGE (rep:Report {observation_id: $observation_id})
-                SET rep.time=$time, rep.end_time=$end_time, rep.latitude=$latitude,
+                SET rep.time=datetime($time),
+                    rep.end_time=CASE WHEN $end_time IS NULL THEN NULL ELSE datetime($end_time) END,
+                    rep.latitude=$latitude,
                     rep.longitude=$longitude, rep.summary=$summary, rep.source=$source,
                     rep.event_name=$event_name, rep.event_type=$event_type,
-                    rep.incident_names=$incident_names
+                    rep.incident_names=$confirmed_incident_names,
+                    rep.candidate_incident_names=$candidate_incident_names
                 MERGE (obs)-[:HAS_REPORT]->(rep)
                 MERGE (dat:Data {observation_id: $observation_id})
-                SET dat.data_val=$data_json, dat.annotations=$annotations_json
+                SET dat.data_val=$data_json, dat.annotations=$annotations_json,
+                    dat.filepath=$filepath, dat.raw=$raw_json, dat.files=$files_json,
+                    dat.anomaly_score=$anomaly_score,
+                    dat.is_anomaly=$is_anomaly,
+                    dat.enrichment_status=$enrichment_status
                 MERGE (rep)-[:HAS_DATA]->(dat)
                 MERGE (tim:TimeEntity {observation_id: $observation_id})
                 SET tim.start_time=$time, tim.end_time=coalesce($end_time, $time)
                 MERGE (rep)-[:CAPTURE_TIME]->(tim)
                 FOREACH (_ IN CASE WHEN $latitude IS NULL OR $longitude IS NULL THEN [] ELSE [1] END |
                   MERGE (geo:GeoEntity {observation_id: $observation_id})
-                  SET geo.latitude=$latitude, geo.longitude=$longitude
+                  SET geo.latitude=$latitude, geo.longitude=$longitude,
+                      geo.name=$location_name, geo.provider=$location_provider,
+                      geo.provider_place_id=$location_provider_place_id
                   MERGE (rep)-[:OCCURRED_AT]->(geo))
                 RETURN elementId(rep) AS report_id
             """, source=record["source"], sensor=str(record["sensor"]),
                 observation_id=record["id"], time=record["time"],
                 end_time=record.get("end_time"), latitude=record.get("latitude"),
-                longitude=record.get("longitude"), summary=summary,
+                longitude=record.get("longitude"), location_name=location_name,
+                location_provider=location.get("provider"),
+                location_provider_place_id=location.get("provider_place_id"), summary=summary,
                 event_name=event.get("name"), event_type=event.get("type"),
-                incident_names=incidents,
+                confirmed_incident_names=news_incidents if originates_incidents(record.get("source")) else [],
+                candidate_incident_names=incidents,
                 data_json=json.dumps(record.get("data") or {}, ensure_ascii=False),
-                annotations_json=json.dumps(annotations, ensure_ascii=False))
+                annotations_json=json.dumps(annotations, ensure_ascii=False),
+                filepath=record.get("filepath"),
+                raw_json=json.dumps(record.get("raw") or {}, ensure_ascii=False),
+                files_json=json.dumps([item.to_dict() for item in record.get("files") or ()],
+                                      ensure_ascii=False),
+                anomaly_score=anomaly.get("score"), is_anomaly=anomaly.get("is_anomaly"),
+                enrichment_status=(record.get("enrichment") or {}).get("status"))
             report_id = result.single()["report_id"]
 
         actor_ids = {}
@@ -276,8 +304,9 @@ class Neo4jStore:
                 return new_id
         return self._insert_incident(report_id, label, context)
 
-    def _link_cross_modality(self, report_id: str, record: dict, limit: int = 12):
-        if not self.reasoner:
+    def _link_cross_modality(self, report_id: str, record: dict, limit: int = 6):
+        if (not self.reasoner or record.get("latitude") is None
+                or record.get("longitude") is None):
             return
         with self.driver.session() as session:
             rows = session.run("""
@@ -285,15 +314,31 @@ class Neo4jStore:
                 WHERE elementId(candidate) <> $report_id
                   AND candidate.observation_id IS NOT NULL
                   AND candidate.source <> $source
+                  AND ($source IN $news_sources OR candidate.source IN $news_sources)
+                  AND candidate.latitude IS NOT NULL AND candidate.longitude IS NOT NULL
+                  AND abs(datetime(candidate.time).epochSeconds - datetime($time).epochSeconds)
+                      <= $max_time_seconds
+                  AND point.distance(
+                        point({latitude:candidate.latitude, longitude:candidate.longitude}),
+                        point({latitude:$latitude, longitude:$longitude})) <= $max_distance_meters
                 RETURN elementId(candidate) AS id,
                        candidate.observation_id AS observation_id,
                        candidate.time AS time, candidate.summary AS summary,
                        candidate.event_type AS event_type,
                        candidate.incident_names AS incidents,
+                       candidate.candidate_incident_names AS candidate_incidents,
                        candidate.latitude AS latitude,
-                       candidate.longitude AS longitude
-                ORDER BY candidate.time DESC LIMIT $limit
-            """, report_id=report_id, source=record["source"], limit=limit)
+                       candidate.longitude AS longitude,
+                       abs(datetime(candidate.time).epochSeconds - datetime($time).epochSeconds)
+                         AS time_delta_seconds,
+                       point.distance(
+                         point({latitude:candidate.latitude, longitude:candidate.longitude}),
+                         point({latitude:$latitude, longitude:$longitude})) AS distance_meters
+                ORDER BY time_delta_seconds, distance_meters LIMIT $limit
+            """, report_id=report_id, source=record["source"], time=record["time"],
+                latitude=record["latitude"], longitude=record["longitude"],
+                news_sources=sorted(NEWS_SOURCES), max_time_seconds=1800,
+                max_distance_meters=20000, limit=limit)
             candidates = [dict(row) for row in rows]
         if not candidates:
             return
@@ -302,7 +347,9 @@ class Neo4jStore:
             "event", "incidents", "news_incidents", "effects",
         )}
         prompt = (
-            "Choose candidates that corroborate the same real-world event. Return only JSON: "
+            "A news report is the only authoritative incident source. Choose at most two sensor "
+            "reports that materially corroborate the same specific news event. An anomaly label, "
+            "nearby location, or similar time alone is insufficient. Return only JSON: "
             "{\"links\":[{\"candidate_id\":\"Neo4j element id\",\"confidence\":0.0," 
             "\"reason\":\"...\"}]}. Exclude weak or topical matches.\n\n"
             f"Incoming: {json.dumps(incoming, default=str)}\n"
@@ -314,6 +361,8 @@ class Neo4jStore:
             print(f"Cross-modality linking skipped after reasoning error: {exc}")
             return
         allowed = {str(item["id"]) for item in candidates}
+        accepted = 0
+        candidate_by_id = {str(item["id"]): item for item in candidates}
         for link in links:
             try:
                 candidate_id = str(link["candidate_id"])
@@ -322,6 +371,7 @@ class Neo4jStore:
                 continue
             if candidate_id not in allowed or confidence < 0.6:
                 continue
+            candidate = candidate_by_id[candidate_id]
             with self.driver.session() as session:
                 session.run("""
                     MATCH (a:Report), (b:Report)
@@ -329,12 +379,18 @@ class Neo4jStore:
                     MERGE (ctx:LLM_CONTEXT {
                       source_observation_id:$observation_id,
                       target_element_id:$candidate_id, kind:'cross_modality'})
-                    SET ctx.reason=$reason, ctx.confidence=$confidence
+                    SET ctx.reason=$reason, ctx.confidence=$confidence,
+                        ctx.distance_meters=$distance_meters,
+                        ctx.time_delta_seconds=$time_delta_seconds
                     MERGE (a)-[:CORROBORATES]->(ctx)
                     MERGE (ctx)-[:CORROBORATES]->(b)
                 """, report_id=report_id, candidate_id=candidate_id,
                     observation_id=record["id"], reason=str(link.get("reason") or ""),
-                    confidence=confidence)
+                    confidence=confidence, distance_meters=candidate["distance_meters"],
+                    time_delta_seconds=candidate["time_delta_seconds"])
+            accepted += 1
+            if accepted >= 2:
+                break
 
     def close(self):
         self.driver.close()

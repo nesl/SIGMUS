@@ -63,6 +63,7 @@ values = {
     "SIGMUS_STREAM_FILE": stream.name,
     "SIGMUS_MCP_PORT": str(config.get("mcp_port", 8006)),
     "SIGMUS_NEO4J_BROWSER_PORT": str(config.get("neo4j_browser_port", 7474)),
+    "SIGMUS_NEO4J_BOLT_PORT": str(config.get("neo4j_bolt_port", 7687)),
 }
 for key, value in values.items():
     print(f"export {key}={shlex.quote(value)}")
