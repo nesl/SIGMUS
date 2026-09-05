@@ -177,22 +177,6 @@ and ingestion creates no more than two links for one incoming report.
 | `IS_PART_OF` | `Incident` | `LLM_CONTEXT` | The child side of an inferred incident hierarchy. |
 | `IS_PART_OF` | `LLM_CONTEXT` | `Incident` | The parent side of an inferred incident hierarchy. |
 
-## Values that are not node types
-
-The following concepts are represented, but are not separate Neo4j node types:
-
-- An event is stored as report properties and in `Data.annotations.event`.
-- A modality is represented by the report's files and data values.
-- Enrichment inference is stored in `Data.annotations`.
-- The rationale for an inferred graph connection is represented by
-  `LLM_CONTEXT`.
-- Numeric measurements are stored in `Data.data_val` and in TimescaleDB.
-
-The older `ontology.jpg` is a conceptual design and uses `Event`, `Modality`,
-`Inference`, `Time`, and `Location` as independent classes. Those boxes should
-not be interpreted as current Neo4j labels. In the implementation, their closest
-equivalents are the representations listed above, `TimeEntity`, and `GeoEntity`.
-
 ## Extending the ontology
 
 Before changing the graph, decide whether the new information is an attribute,
@@ -273,13 +257,36 @@ To project it:
    graph ingestion.
 2. In `database_storage/graph.py`, process each response after its corresponding
    `Incident` exists. Use `response_id` as its stable identity and set its
-   descriptive properties:
+   descriptive properties. In this project, Cypher is written as a Python
+   multiline string and executed by the Neo4j driver's `session.run()` method.
+   Add a helper method to `Neo4jStore`:
 
-```cypher
-MERGE (response:Response {response_id: $response_id})
-SET response.description = $description,
-    response.status = $status
+```python
+def _insert_responses(self, responses: list[dict]) -> None:
+    for item in responses:
+        response_id = item.get("response_id")
+        if not response_id:
+            continue
+        with self.driver.session() as session:
+            session.run("""
+                MERGE (response:Response {response_id: $response_id})
+                SET response.description=$description,
+                    response.status=$status
+            """, response_id=response_id,
+                description=item.get("description"),
+                status=item.get("status"))
 ```
+
+3. In `insert_observation()`, immediately after the existing block that creates
+   incidents, call:
+
+```python
+self._insert_responses(record.get("responses", []))
+```
+
+The indented text between `"""` markers is the Cypher query. The values after
+the string are Python keyword arguments that become Cypher parameters such as
+`$response_id`.
 
 `response_id` is required because descriptions such as “Fire department
 dispatched” are not unique. One incident may have many responses. Each response
@@ -298,19 +305,31 @@ Define the relationship as:
 |---|---|---|---|---|
 | `INCIDENT_RESPONSE` | `Response` | `Incident` | This response was made for this incident. | Each response has one incident; an incident can have many responses. |
 
-After merging the `Response`, match the already-confirmed `Incident` using the
-response's `incident_name` and merge the edge:
+This example uses information already copied into each `responses` item, so no
+additional change to `database_storage/observation.py` is needed. Modify the
+query inside `_insert_responses()` so that the existing `Incident` is matched
+and the edge is merged in the same database call:
 
-```cypher
-MATCH (incident:Incident {label: $incident_name})
-MATCH (response:Response {response_id: $response_id})
-MERGE (response)-[:INCIDENT_RESPONSE]->(incident)
+```python
+session.run("""
+    MATCH (incident:Incident {label: $incident_name})
+    MERGE (response:Response {response_id: $response_id})
+    SET response.description=$description,
+        response.status=$status
+    MERGE (response)-[:INCIDENT_RESPONSE]->(incident)
+""", incident_name=item.get("incident_name"),
+    response_id=response_id,
+    description=item.get("description"),
+    status=item.get("status"))
 ```
 
 Use `MERGE`, rather than `CREATE`, so replaying an observation does not create
-duplicate edges. This relationship is directly stated by the response input,
-so it does not need an `LLM_CONTEXT` node. If SIGMUS inferred the connection
-instead, its reason and confidence should be retained through `LLM_CONTEXT`.
+duplicate edges. `MATCH` also means that SIGMUS will not create an unconfirmed
+incident merely because a response names it. The response and edge are created
+only when an `Incident` with that label already exists. This relationship is
+directly stated by the response input, so it does not need an `LLM_CONTEXT`
+node. If SIGMUS inferred the connection instead, its reason and confidence
+should be retained through `LLM_CONTEXT`.
 
 Again, a test is not needed to make the relationship work. The same projection
 test used for the attribute and node can assert that the query connects
