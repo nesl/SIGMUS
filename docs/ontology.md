@@ -196,74 +196,136 @@ equivalents are the representations listed above, `TimeEntity`, and `GeoEntity`.
 ## Extending the ontology
 
 Before changing the graph, decide whether the new information is an attribute,
-a node, or a relationship:
+a node, or a relationship. The examples below build one small extension:
 
-- Use an **attribute** when the value describes one existing object.
-- Use a **node** when the thing has its own identity or will be shared by several
-  reports.
-- Use a **relationship** when the important fact is how two existing things are
-  connected.
+- `Report.data_quality` describes the quality of a report.
+- A `Response` node describes an action taken in response to an incident.
+- `(:Response)-[:INCIDENT_RESPONSE]->(:Incident)` identifies the incident to
+  which the response belongs.
 
-### Add an attribute
+Use an attribute when the value only describes an existing object. Use a node
+when the thing has its own identity and properties. Use a relationship when the
+important fact is how two nodes are connected.
 
-Most new source values should be added under the observation's `data` object.
-Most new enrichment values should be added under `annotations`. SIGMUS already
-stores both objects, so this requires no graph change.
+Projection tests are recommended, but they do not make a Neo4j projection work.
+The runtime changes are in `database_storage/observation.py` and
+`database_storage/graph.py`. A test simply detects later changes that would
+silently stop writing the new graph data. The three examples can be covered by
+one small test rather than one test per change.
 
-If the attribute must be a directly searchable property on a graph node:
+### Add an attribute: report data quality
 
-1. Add the value to `database_storage/observation.py`.
-   This step carries it from the shared observation into SIGMUS's normalized
-   storage record.
-2. Add a parameter and `SET` assignment in `database_storage/graph.py`.
-   This step writes the value onto the intended Neo4j node.
-3. Add or update a projection test in `tests/test_graph_projection.py`.
-   This step prevents ingestion from silently dropping the attribute later.
+Suppose enrichment supplies this value:
 
-Example: a report-level `quality_score` would be normalized as
-`record["quality_score"]`, passed as `$quality_score`, and assigned with
-`rep.quality_score=$quality_score`.
+```json
+{
+  "annotations": {
+    "data_quality": "high"
+  }
+}
+```
 
-### Add a node type
+To make it a searchable property on `Report`:
 
-Use a node when several observations can refer to the same independently
-identifiable thing—for example, a critical-infrastructure facility.
+1. In `database_storage/observation.py`, add
+   `"data_quality": annotations.get("data_quality")` to the record returned by
+   `to_storage_record()`. This carries the value from the shared observation to
+   graph ingestion.
+2. In the `Report` query in `database_storage/graph.py`, add the query parameter
+   `data_quality=record.get("data_quality")` and the assignment
+   `rep.data_quality=$data_quality`. This stores the property in Neo4j.
 
-1. Define the input shape under `annotations`.
-   This gives collectors and enrichment one consistent representation to
-   produce, such as `{id, name, type}`.
-2. Copy that structure into the normalized record in
-   `database_storage/observation.py`.
-   This makes the new information available to graph ingestion.
-3. In `database_storage/graph.py`, `MERGE` the node using a stable identifier,
-   set its descriptive properties, and connect it to the appropriate existing
-   node.
-   A stable identifier prevents two different things with similar names from
-   being merged accidentally.
-4. Add a graph-projection test covering the node, its identity, and its edge.
-   This verifies both the shape and intended cardinality.
+The resulting graph data is:
 
-For example, an `Infrastructure` node could use `facility_id` as its identity
-and connect from a report with `AFFECTS`.
+```cypher
+(:Report {observation_id: "report-123", data_quality: "high"})
+```
 
-### Add a relationship
+No test change is required for this to run. A useful regression assertion is
+that the projection query contains `rep.data_quality=$data_quality` and that
+the supplied parameter is `"high"`.
 
-1. Define its allowed start node, end node, direction, meaning, and cardinality.
-   This prevents the same relationship name from acquiring several conflicting
-   meanings.
-2. Decide where the relationship evidence appears in `data` or `annotations`,
-   then copy it into the normalized storage record.
-   Ingestion needs an explicit, traceable input rather than guessing a link from
-   unrelated fields.
-3. Add a `MERGE` for the relationship in `database_storage/graph.py`.
-   `MERGE` makes repeated ingestion idempotent instead of creating duplicate
-   edges.
-4. If the relationship is inferred rather than directly observed, connect the
-   endpoints through an `LLM_CONTEXT` node and store the reason and confidence.
-   This preserves provenance and distinguishes inference from fact.
-5. Add a projection test that checks the endpoints, direction, and evidence.
-   This protects the relationship's meaning as the ingestion code changes.
+### Add a node type: response
+
+A response has its own identity and may later acquire properties such as the
+responding organization, status, or start time, so it should be a node rather
+than a property on `Incident`. For example, enrichment could supply:
+
+```json
+{
+  "annotations": {
+    "responses": [
+      {
+        "response_id": "response-456",
+        "description": "Fire department dispatched",
+        "status": "active",
+        "incident_name": "2026 Downtown Warehouse Fire"
+      }
+    ]
+  }
+}
+```
+
+To project it:
+
+1. In `database_storage/observation.py`, copy `annotations.responses` into a
+   `responses` list in the normalized record. This makes the input available to
+   graph ingestion.
+2. In `database_storage/graph.py`, process each response after its corresponding
+   `Incident` exists. Use `response_id` as its stable identity and set its
+   descriptive properties:
+
+```cypher
+MERGE (response:Response {response_id: $response_id})
+SET response.description = $description,
+    response.status = $status
+```
+
+`response_id` is required because descriptions such as “Fire department
+dispatched” are not unique. One incident may have many responses. Each response
+belongs to exactly one incident in this simple model; create another response
+node if the same action is recorded for a different incident.
+
+No test is required for Neo4j to create the node. A regression test is still
+helpful to confirm that `Response` is merged by `response_id` instead of by its
+description.
+
+### Add a relationship: incident response
+
+Define the relationship as:
+
+| Relationship | From | To | Meaning | Cardinality |
+|---|---|---|---|---|
+| `INCIDENT_RESPONSE` | `Response` | `Incident` | This response was made for this incident. | Each response has one incident; an incident can have many responses. |
+
+After merging the `Response`, match the already-confirmed `Incident` using the
+response's `incident_name` and merge the edge:
+
+```cypher
+MATCH (incident:Incident {label: $incident_name})
+MATCH (response:Response {response_id: $response_id})
+MERGE (response)-[:INCIDENT_RESPONSE]->(incident)
+```
+
+Use `MERGE`, rather than `CREATE`, so replaying an observation does not create
+duplicate edges. This relationship is directly stated by the response input,
+so it does not need an `LLM_CONTEXT` node. If SIGMUS inferred the connection
+instead, its reason and confidence should be retained through `LLM_CONTEXT`.
+
+Again, a test is not needed to make the relationship work. The same projection
+test used for the attribute and node can assert that the query connects
+`Response` to `Incident` in the documented direction.
+
+The combined result looks like this:
+
+```mermaid
+flowchart LR
+    Report["Report<br/>data_quality: high"] -->|HAS_LABEL| Incident
+    Response -->|INCIDENT_RESPONSE| Incident
+```
 
 For every extension, prefer the smallest representation that answers the
-required questions. Do not create a node when a simple attribute is sufficient,
-and do not create an inferred relationship without retaining its evidence.
+required questions. These examples require code changes because they create
+directly queryable graph structure; values that only need to remain in the
+original enrichment can stay inside `Data.annotations` without any projection
+change.
