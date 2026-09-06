@@ -1,10 +1,11 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from qa.client import _tool_result
+from qa.client import _system_prompt, _tool_result
 from qa.query_service import QueryService, _plain
 
 
@@ -47,6 +48,18 @@ def test_report_time_exposes_same_instant_in_utc_and_local_time():
 def test_mcp_structured_result_is_forwarded_to_llm():
     result = SimpleNamespace(structuredContent={"result": [{"observation_id": "obs-1"}]}, content=[])
     assert '"observation_id": "obs-1"' in _tool_result(result)
+
+
+def test_qa_prompt_includes_authoritative_local_and_utc_clock():
+    prompt = _system_prompt(
+        now=datetime(2026, 9, 6, 17, 30, tzinfo=timezone.utc),
+        timezone_name="America/Los_Angeles",
+    )
+
+    assert "Current UTC time: 2026-09-06T17:30:00+00:00" in prompt
+    assert "Current configured-local time: 2026-09-06T10:30:00-07:00" in prompt
+    assert 'Interpret "this morning" as local midnight through local noon' in prompt
+    assert "Never substitute a remembered" in prompt
 
 
 def test_invalid_aggregate_is_rejected_before_database_query():

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
 import os
 import sys
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -49,6 +51,28 @@ about a report, include its location, configured-local and UTC times, and origin
 those values are available; explicitly say which values are unavailable rather than inventing them."""
 
 
+def _system_prompt(*, now: datetime | None = None, timezone_name: str) -> str:
+    """Attach an authoritative request-time clock to the stable Q/A instructions."""
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    utc_now = instant.astimezone(timezone.utc)
+    local_now = utc_now.astimezone(ZoneInfo(timezone_name))
+    return SYSTEM_PROMPT + f"""
+
+Authoritative clock for this request:
+- Current UTC time: {utc_now.isoformat()}
+- Current configured-local time: {local_now.isoformat()}
+- Configured local timezone: {timezone_name}
+
+Use this clock whenever the user gives a relative time such as "now", "today", "this morning",
+"tonight", "yesterday", or "recently". Derive explicit ISO-8601 start and end timestamps in the
+configured local timezone before calling a time-filtered tool; include UTC offsets so the database
+receives unambiguous instants. Interpret "this morning" as local midnight through local noon,
+capped at the current local time if noon has not yet occurred. Never substitute a remembered,
+training-era, or guessed date for the authoritative clock above."""
+
+
 def _tool_result(result: Any) -> str:
     structured = getattr(result, "structuredContent", None)
     if structured is not None:
@@ -63,8 +87,9 @@ def _tool_result(result: Any) -> str:
 
 async def answer(question: str, *, mcp_url: str, model: str | None = None,
                  max_rounds: int = 8, openai_client=None, verbose: bool = False) -> str:
+    config = get_config()
     if openai_client is None:
-        openai_config = get_config()["openai"]
+        openai_config = config["openai"]
         client = OpenAI(api_key=openai_config["api"])
         model = model or openai_config.get("qa_model") or openai_config.get("model", "gpt-4o-mini")
     else:
@@ -84,7 +109,9 @@ async def answer(question: str, *, mcp_url: str, model: str | None = None,
                 },
             } for tool in listed.tools]
             messages: list[dict] = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _system_prompt(
+                    timezone_name=config.get("timezone", "America/Los_Angeles")
+                )},
                 {"role": "user", "content": question},
             ]
             for _ in range(max_rounds):
